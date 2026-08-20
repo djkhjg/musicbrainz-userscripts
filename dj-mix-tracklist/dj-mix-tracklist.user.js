@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         MusicBrainz - DJ Mix Tracklist
+// @name         MusicBrainz: Better DJ Mix Tracklist display
 // @namespace    https://musicbrainz.org/
 // @version      1.0.0
 // @description  Display DJ-mix relationships as a numbered tracklist using MusicBrainz relationship ordering.
