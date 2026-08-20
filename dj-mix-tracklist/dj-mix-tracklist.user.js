@@ -1,8 +1,12 @@
 // ==UserScript==
-// @name         MusicBrainz: Better DJ Mix Tracklist display
+// @name         MusicBrainz - DJ Mix Tracklist
 // @namespace    https://musicbrainz.org/
 // @version      1.0.0
 // @description  Display DJ-mix relationships as a numbered tracklist using MusicBrainz relationship ordering.
+// @homepageURL  https://github.com/djkhjg/musicbrainz-userscripts
+// @supportURL   https://github.com/djkhjg/musicbrainz-userscripts/issues
+// @downloadURL  https://raw.githubusercontent.com/djkhjg/musicbrainz-userscripts/main/dj-mix-tracklist/dj-mix-tracklist.user.js
+// @updateURL    https://raw.githubusercontent.com/djkhjg/musicbrainz-userscripts/main/dj-mix-tracklist/dj-mix-tracklist.user.js
 // @match        *://*.musicbrainz.org/release/*
 // @grant        none
 // ==/UserScript==
