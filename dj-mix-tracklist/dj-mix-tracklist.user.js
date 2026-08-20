@@ -92,7 +92,7 @@
             }
 
             console.log(
-                'MusicBrainz DJ Mix Tracklist: Retrieved ordering:',
+                'MusicBrainz: Better DJ Mix Tracklist display: Retrieved ordering:',
                 ordering
             );
 
@@ -100,7 +100,7 @@
 
         } catch (error) {
             console.error(
-                'MusicBrainz DJ Mix Tracklist: API error:',
+                'MusicBrainz: Better DJ Mix Tracklist display: API error:',
                 error
             );
 
@@ -134,20 +134,6 @@
 
             const nodes = [...dd.childNodes];
 
-            /*
-             * IMPORTANT:
-             *
-             * MusicBrainz renders each recording like:
-             *
-             *   <span class="recordinglink"></span>
-             *   <a href="/recording/...">Track</a>
-             *
-             * The recordinglink span contains the little recording icon.
-             *
-             * Therefore each track must start at that span, NOT at the
-             * recording <a>. Otherwise the icon for the next recording
-             * gets attached to the end of the previous line.
-             */
             const starts = recordingLinks.map(link => {
                 const previous = link.previousSibling;
 
