@@ -1,6 +1,8 @@
 # musicbrainz-userscripts
 A collection of userscripts for improving and extending MusicBrainz.
 
+Note: All scripts written with the use of LLM ai
+
 ## Scripts
 
 ### DJ Mix Tracklist
