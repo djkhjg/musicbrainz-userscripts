@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Harmony: Beatport Recovery
 // @namespace    https://github.com/djkhjg/musicbrainz-userscripts
-// @version      0.4.1
+// @version      0.4.2
 // @description  Recovers Beatport metadata for Harmony using Beatport's browser search results and adds it to MusicBrainz seeds.
 // @author       djkhjg
 // @license      MIT
@@ -177,6 +177,15 @@
         return '';
     }
 
+    function isHarmonyBeatportEnabled() {
+        const checkbox =
+            document.querySelector('#beatport-input');
+
+        return Boolean(
+            checkbox?.checked
+        );
+    }
+
     function buildBeatportSearchUrl() {
         const title = getReleaseTitle();
         const artist = getReleaseArtist();
@@ -192,6 +201,67 @@
         return (
             'https://www.beatport.com/search?q=' +
             encodeURIComponent(query)
+        );
+    }
+
+    // =========================================================================
+    // HARMONY — BEATPORT CACHE MANAGEMENT
+    // =========================================================================
+
+    async function clearBeatportRecoveryData() {
+        activeBeatportResult = null;
+
+        await GM_deleteValue(
+            REQUEST_KEY
+        );
+
+        await GM_deleteValue(
+            RESULT_KEY
+        );
+
+        console.log(
+            '[Harmony Beatport Recovery] ' +
+            'Cached Beatport recovery data cleared.'
+        );
+    }
+
+    function setupBeatportCheckboxListener() {
+        const checkbox =
+            document.querySelector('#beatport-input');
+
+        if (!checkbox) {
+            return;
+        }
+
+        /*
+         * Prevent duplicate listeners if Harmony rerenders.
+         */
+        if (
+            checkbox.dataset
+                .hbrCheckboxListener ===
+            'true'
+        ) {
+            return;
+        }
+
+        checkbox.dataset
+            .hbrCheckboxListener =
+            'true';
+
+        checkbox.addEventListener(
+            'change',
+            async () => {
+                if (checkbox.checked) {
+                    return;
+                }
+
+                console.log(
+                    '[Harmony Beatport Recovery] ' +
+                    'Beatport unchecked; clearing cached recovery data.'
+                );
+
+                await clearBeatportRecoveryData();
+            }
         );
     }
 
@@ -213,7 +283,10 @@
                 .replace(/:$/, '')
                 .trim();
 
-            if (providerName.toLowerCase() === 'beatport') {
+            if (
+                providerName.toLowerCase() ===
+                'beatport'
+            ) {
                 return message;
             }
         }
@@ -234,99 +307,154 @@
     // =========================================================================
 
     function createHarmonyButton() {
-        const button = document.createElement('button');
+        const button =
+            document.createElement('button');
 
-        button.id = BUTTON_ID;
-        button.type = 'button';
-        button.textContent = 'Find on Beatport';
+        button.id =
+            BUTTON_ID;
 
-        Object.assign(button.style, {
-            marginTop: '8px',
-            padding: '6px 12px',
-            border: '1px solid #777',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9em',
-            fontWeight: 'bold'
-        });
+        button.type =
+            'button';
 
-        button.addEventListener('click', async () => {
-            const searchUrl = buildBeatportSearchUrl();
+        button.textContent =
+            'Find on Beatport';
 
-            const barcode = getHarmonyBarcode();
-            const title = getReleaseTitle();
-            const artist = getReleaseArtist();
-
-            if (!searchUrl) {
-                alert(
-                    'Could not determine the Harmony release title or artist.'
-                );
-                return;
+        Object.assign(
+            button.style,
+            {
+                marginTop: '8px',
+                padding: '6px 12px',
+                border: '1px solid #777',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '0.9em',
+                fontWeight: 'bold'
             }
+        );
 
-            if (!barcode) {
-                alert(
-                    'This Harmony result does not contain a UPC/GTIN.\n\n' +
-                    'Beatport Recovery cannot automatically identify the ' +
-                    'correct Beatport release without one.'
+        button.addEventListener(
+            'click',
+            async () => {
+                const searchUrl =
+                    buildBeatportSearchUrl();
+
+                const barcode =
+                    getHarmonyBarcode();
+
+                const title =
+                    getReleaseTitle();
+
+                const artist =
+                    getReleaseArtist();
+
+                if (!searchUrl) {
+                    alert(
+                        'Could not determine the Harmony release title or artist.'
+                    );
+
+                    return;
+                }
+
+                if (!barcode) {
+                    alert(
+                        'This Harmony result does not contain a UPC/GTIN.\n\n' +
+                        'Beatport Recovery cannot automatically identify the ' +
+                        'correct Beatport release without one.'
+                    );
+
+                    return;
+                }
+
+                const requestId =
+                    makeRequestId();
+
+                const request = {
+                    requestId,
+                    timestamp:
+                        Date.now(),
+                    barcode,
+                    title,
+                    artist,
+                    searchUrl
+                };
+
+                await GM_setValue(
+                    REQUEST_KEY,
+                    request
                 );
-                return;
+
+                await GM_deleteValue(
+                    RESULT_KEY
+                );
+
+                console.log(
+                    '[Harmony Beatport Recovery] Created request:',
+                    request
+                );
+
+                button.textContent =
+                    'Waiting for Beatport…';
+
+                button.disabled =
+                    true;
+
+                const url =
+                    new URL(
+                        searchUrl
+                    );
+
+                url.searchParams.set(
+                    'hbr',
+                    requestId
+                );
+
+                window.open(
+                    url.toString(),
+                    '_blank'
+                );
             }
-
-            const requestId = makeRequestId();
-
-            const request = {
-                requestId,
-                timestamp: Date.now(),
-                barcode,
-                title,
-                artist,
-                searchUrl
-            };
-
-            await GM_setValue(REQUEST_KEY, request);
-            await GM_deleteValue(RESULT_KEY);
-
-            console.log(
-                '[Harmony Beatport Recovery] Created request:',
-                request
-            );
-
-            button.textContent = 'Waiting for Beatport…';
-            button.disabled = true;
-
-            const url = new URL(searchUrl);
-
-            url.searchParams.set(
-                'hbr',
-                requestId
-            );
-
-            window.open(
-                url.toString(),
-                '_blank'
-            );
-        });
+        );
 
         return button;
     }
 
     function addHarmonyButton() {
-        if (document.getElementById(BUTTON_ID)) {
+        if (
+            document.getElementById(
+                BUTTON_ID
+            )
+        ) {
             return;
         }
 
-        const message = findBeatportMessage();
+        /*
+         * If Beatport is disabled in Harmony, do not add a recovery button.
+         */
+        if (
+            !isHarmonyBeatportEnabled()
+        ) {
+            return;
+        }
+
+        const message =
+            findBeatportMessage();
 
         if (!message) {
             return;
         }
 
-        if (message.dataset.hbrRecovered === 'true') {
+        if (
+            message.dataset
+                .hbrRecovered ===
+            'true'
+        ) {
             return;
         }
 
-        const content = getBeatportMessageContent(message);
+        const content =
+            getBeatportMessageContent(
+                message
+            );
 
         content.appendChild(
             createHarmonyButton()
@@ -339,28 +467,48 @@
 
     function injectBeatportProvider(release) {
         const providerList =
-            document.querySelector('.provider-list');
+            document.querySelector(
+                '.provider-list'
+            );
 
         if (!providerList) {
             return;
         }
 
         let item =
-            document.getElementById(PROVIDER_ITEM_ID);
+            document.getElementById(
+                PROVIDER_ITEM_ID
+            );
 
         if (!item) {
-            item = document.createElement('li');
-            item.id = PROVIDER_ITEM_ID;
-            item.dataset.provider = 'Beatport';
+            item =
+                document.createElement(
+                    'li'
+                );
 
-            providerList.appendChild(item);
+            item.id =
+                PROVIDER_ITEM_ID;
+
+            item.dataset.provider =
+                'Beatport';
+
+            providerList.appendChild(
+                item
+            );
         }
 
         item.replaceChildren();
 
-        const icon = document.createElement('span');
-        icon.className = 'beatport';
-        icon.title = 'Beatport';
+        const icon =
+            document.createElement(
+                'span'
+            );
+
+        icon.className =
+            'beatport';
+
+        icon.title =
+            'Beatport';
 
         icon.innerHTML = `
             <svg class="icon" width="20" height="20" stroke-width="1.5">
@@ -368,18 +516,41 @@
             </svg>
         `;
 
-        const label = document.createTextNode('Beatport: ');
+        const label =
+            document.createTextNode(
+                'Beatport: '
+            );
 
-        const link = document.createElement('a');
-        link.className = 'provider-id';
-        link.href = release.releaseUrl;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = release.releaseId;
+        const link =
+            document.createElement(
+                'a'
+            );
 
-        const recovered = document.createElement('span');
-        recovered.className = 'label ml-2';
-        recovered.textContent = 'Recovered by userscript';
+        link.className =
+            'provider-id';
+
+        link.href =
+            release.releaseUrl;
+
+        link.target =
+            '_blank';
+
+        link.rel =
+            'noopener noreferrer';
+
+        link.textContent =
+            release.releaseId;
+
+        const recovered =
+            document.createElement(
+                'span'
+            );
+
+        recovered.className =
+            'label ml-2';
+
+        recovered.textContent =
+            'Recovered by userscript';
 
         item.append(
             icon,
@@ -394,22 +565,38 @@
     // =========================================================================
 
     function injectBeatportLabelAlternative(release) {
-        if (!release.label?.name) {
+        if (
+            !release.label?.name
+        ) {
             return;
         }
 
-        const rows = document.querySelectorAll('.release-info tr');
+        const rows =
+            document.querySelectorAll(
+                '.release-info tr'
+            );
 
-        let labelsCell = null;
+        let labelsCell =
+            null;
 
         for (const row of rows) {
-            const heading = row.querySelector('th');
+            const heading =
+                row.querySelector(
+                    'th'
+                );
 
             if (
                 heading &&
-                cleanText(heading.textContent).toLowerCase() === 'labels'
+                cleanText(
+                    heading.textContent
+                ).toLowerCase() ===
+                'labels'
             ) {
-                labelsCell = row.querySelector('td');
+                labelsCell =
+                    row.querySelector(
+                        'td'
+                    );
+
                 break;
             }
         }
@@ -419,48 +606,94 @@
         }
 
         let altValues =
-            labelsCell.querySelector(':scope > ul.alt-values');
+            labelsCell.querySelector(
+                ':scope > ul.alt-values'
+            );
 
         if (!altValues) {
-            altValues = document.createElement('ul');
-            altValues.className = 'alt-values';
+            altValues =
+                document.createElement(
+                    'ul'
+                );
 
-            labelsCell.appendChild(altValues);
+            altValues.className =
+                'alt-values';
+
+            labelsCell.appendChild(
+                altValues
+            );
         }
 
         let beatportEntry =
-            document.getElementById(LABEL_ALT_ID);
+            document.getElementById(
+                LABEL_ALT_ID
+            );
 
         if (!beatportEntry) {
-            beatportEntry = document.createElement('li');
-            beatportEntry.id = LABEL_ALT_ID;
+            beatportEntry =
+                document.createElement(
+                    'li'
+                );
 
-            altValues.appendChild(beatportEntry);
+            beatportEntry.id =
+                LABEL_ALT_ID;
+
+            altValues.appendChild(
+                beatportEntry
+            );
         }
 
         beatportEntry.replaceChildren();
 
-        const releaseLabels = document.createElement('ul');
-        releaseLabels.className = 'release-labels inline';
+        const releaseLabels =
+            document.createElement(
+                'ul'
+            );
 
-        const releaseLabel = document.createElement('li');
+        releaseLabels.className =
+            'release-labels inline';
 
-        const entityLinks = document.createElement('span');
-        entityLinks.className = 'entity-links';
+        const releaseLabel =
+            document.createElement(
+                'li'
+            );
+
+        const entityLinks =
+            document.createElement(
+                'span'
+            );
+
+        entityLinks.className =
+            'entity-links';
 
         if (release.label.id) {
-            const labelLink = document.createElement('a');
+            const labelLink =
+                document.createElement(
+                    'a'
+                );
 
             labelLink.href =
-                `https://www.beatport.com/label/` +
-                `${slugify(release.label.name)}/${release.label.id}`;
+                'https://www.beatport.com/label/' +
+                `${slugify(
+                    release.label.name
+                )}/${release.label.id}`;
 
-            labelLink.target = '_blank';
-            labelLink.rel = 'noopener noreferrer';
+            labelLink.target =
+                '_blank';
 
-            const smallIcon = document.createElement('span');
-            smallIcon.className = 'beatport';
-            smallIcon.title = 'Beatport';
+            labelLink.rel =
+                'noopener noreferrer';
+
+            const smallIcon =
+                document.createElement(
+                    'span'
+                );
+
+            smallIcon.className =
+                'beatport';
+
+            smallIcon.title =
+                'Beatport';
 
             smallIcon.innerHTML = `
                 <svg class="icon" width="18" height="18" stroke-width="1.5">
@@ -468,7 +701,9 @@
                 </svg>
             `;
 
-            labelLink.appendChild(smallIcon);
+            labelLink.appendChild(
+                smallIcon
+            );
 
             labelLink.appendChild(
                 document.createTextNode(
@@ -476,15 +711,21 @@
                 )
             );
 
-            entityLinks.appendChild(labelLink);
+            entityLinks.appendChild(
+                labelLink
+            );
         } else {
             entityLinks.textContent =
                 release.label.name;
         }
 
-        releaseLabel.appendChild(entityLinks);
+        releaseLabel.appendChild(
+            entityLinks
+        );
 
-        if (release.catalogNumber) {
+        if (
+            release.catalogNumber
+        ) {
             releaseLabel.appendChild(
                 document.createTextNode(
                     ` ${release.catalogNumber}`
@@ -496,9 +737,16 @@
             releaseLabel
         );
 
-        const providerIcon = document.createElement('span');
-        providerIcon.className = 'beatport';
-        providerIcon.title = 'Beatport';
+        const providerIcon =
+            document.createElement(
+                'span'
+            );
+
+        providerIcon.className =
+            'beatport';
+
+        providerIcon.title =
+            'Beatport';
 
         providerIcon.innerHTML = `
             <svg class="icon" width="24" height="24" stroke-width="1.25">
@@ -517,58 +765,87 @@
     // =========================================================================
 
     function getSeedLabels(form) {
-        const labels = [];
+        const labels =
+            [];
 
-        for (const input of form.querySelectorAll('input[name]')) {
-            const match = input.name.match(
-                /^labels\.(\d+)\.name$/
-            );
+        for (
+            const input
+            of form.querySelectorAll(
+                'input[name]'
+            )
+        ) {
+            const match =
+                input.name.match(
+                    /^labels\.(\d+)\.name$/
+                );
 
             if (!match) {
                 continue;
             }
 
             labels.push({
-                index: Number(match[1]),
-                name: input.value
+                index:
+                    Number(
+                        match[1]
+                    ),
+
+                name:
+                    input.value
             });
         }
 
         return labels;
     }
 
-    function findSeedLabelIndex(form, beatportLabelName) {
-        const labels = getSeedLabels(form);
+    function findSeedLabelIndex(
+        form,
+        beatportLabelName
+    ) {
+        const labels =
+            getSeedLabels(
+                form
+            );
 
         if (!labels.length) {
             return null;
         }
 
         const normalizedBeatport =
-            normalizeName(beatportLabelName);
+            normalizeName(
+                beatportLabelName
+            );
 
-        const exactMatch = labels.find(
-            label =>
-                normalizeName(label.name) ===
-                normalizedBeatport
-        );
+        const exactMatch =
+            labels.find(
+                label =>
+                    normalizeName(
+                        label.name
+                    ) ===
+                    normalizedBeatport
+            );
 
         if (exactMatch) {
             return exactMatch.index;
         }
 
         /*
-         * If Harmony only has one label, associate the catalog number with
-         * that label.
+         * If Harmony only has one label, associate the Beatport catalog number
+         * with that one label rather than guessing between multiple labels.
          */
-        if (labels.length === 1) {
+        if (
+            labels.length ===
+            1
+        ) {
             return labels[0].index;
         }
 
         return null;
     }
 
-    function injectCatalogNumberIntoReleaseSeed(form, release) {
+    function injectCatalogNumberIntoReleaseSeed(
+        form,
+        release
+    ) {
         if (
             !release.catalogNumber ||
             !release.label?.name
@@ -582,7 +859,10 @@
                 release.label.name
             );
 
-        if (labelIndex === null) {
+        if (
+            labelIndex ===
+            null
+        ) {
             console.warn(
                 '[Harmony Beatport Recovery] ' +
                 'Could not safely determine which seeded label should ' +
@@ -605,18 +885,27 @@
          * Never silently overwrite a different catalog number that Harmony
          * already has.
          */
-        if (input?.value) {
+        if (
+            input?.value
+        ) {
             if (
-                cleanText(input.value) !==
-                cleanText(release.catalogNumber)
+                cleanText(
+                    input.value
+                ) !==
+                cleanText(
+                    release.catalogNumber
+                )
             ) {
                 console.warn(
                     '[Harmony Beatport Recovery] ' +
                     'Harmony already has a different catalog number; ' +
                     'leaving it unchanged.',
                     {
-                        harmony: input.value,
-                        beatport: release.catalogNumber
+                        harmony:
+                            input.value,
+
+                        beatport:
+                            release.catalogNumber
                     }
                 );
             }
@@ -625,17 +914,20 @@
         }
 
         if (!input) {
-            input = createHiddenInput(
-                form,
-                fieldName,
-                release.catalogNumber
-            );
+            input =
+                createHiddenInput(
+                    form,
+                    fieldName,
+                    release.catalogNumber
+                );
         } else {
             input.value =
                 release.catalogNumber;
         }
 
-        input.dataset.hbrBeatport = 'true';
+        input.dataset
+            .hbrBeatport =
+            'true';
 
         console.log(
             '[Harmony Beatport Recovery] Seeded catalog number:',
@@ -644,22 +936,40 @@
     }
 
     function getSeedUrlEntries(form) {
-        const entries = new Map();
+        const entries =
+            new Map();
 
-        for (const input of form.querySelectorAll('input[name]')) {
+        for (
+            const input
+            of form.querySelectorAll(
+                'input[name]'
+            )
+        ) {
             let match =
                 input.name.match(
                     /^urls\.(\d+)\.url$/
                 );
 
             if (match) {
-                const index = Number(match[1]);
+                const index =
+                    Number(
+                        match[1]
+                    );
 
-                if (!entries.has(index)) {
-                    entries.set(index, {});
+                if (
+                    !entries.has(
+                        index
+                    )
+                ) {
+                    entries.set(
+                        index,
+                        {}
+                    );
                 }
 
-                entries.get(index).url =
+                entries.get(
+                    index
+                ).url =
                     input.value;
 
                 continue;
@@ -671,13 +981,25 @@
                 );
 
             if (match) {
-                const index = Number(match[1]);
+                const index =
+                    Number(
+                        match[1]
+                    );
 
-                if (!entries.has(index)) {
-                    entries.set(index, {});
+                if (
+                    !entries.has(
+                        index
+                    )
+                ) {
+                    entries.set(
+                        index,
+                        {}
+                    );
                 }
 
-                entries.get(index).linkType =
+                entries.get(
+                    index
+                ).linkType =
                     input.value;
             }
         }
@@ -685,7 +1007,10 @@
         return entries;
     }
 
-    function injectBeatportUrlIntoSeed(form, release) {
+    function injectBeatportUrlIntoSeed(
+        form,
+        release
+    ) {
         if (!release.releaseUrl) {
             return;
         }
@@ -693,27 +1018,45 @@
         /*
          * Beatport release pages are seeded as both:
          *
-         *   74  = purchase for download
-         *   980 = streaming page
+         * 74  = purchase for download
+         * 980 = streaming page
          */
         const wantedLinkTypes = [
             MB_PAID_DOWNLOAD_LINK_TYPE,
             MB_STREAMING_LINK_TYPE
         ];
 
-        for (const wantedType of wantedLinkTypes) {
+        for (
+            const wantedType
+            of wantedLinkTypes
+        ) {
             const entries =
-                getSeedUrlEntries(form);
+                getSeedUrlEntries(
+                    form
+                );
 
-            let alreadyExists = false;
+            let alreadyExists =
+                false;
 
-            for (const entry of entries.values()) {
+            for (
+                const entry
+                of entries.values()
+            ) {
                 if (
-                    cleanText(entry.url) ===
-                    cleanText(release.releaseUrl) &&
-                    String(entry.linkType) === wantedType
+                    cleanText(
+                        entry.url
+                    ) ===
+                    cleanText(
+                        release.releaseUrl
+                    ) &&
+                    String(
+                        entry.linkType
+                    ) ===
+                    wantedType
                 ) {
-                    alreadyExists = true;
+                    alreadyExists =
+                        true;
+
                     break;
                 }
             }
@@ -722,9 +1065,12 @@
                 continue;
             }
 
-            let nextIndex = 0;
+            let nextIndex =
+                0;
 
-            if (entries.size) {
+            if (
+                entries.size
+            ) {
                 nextIndex =
                     Math.max(
                         ...entries.keys()
@@ -745,8 +1091,13 @@
                     wantedType
                 );
 
-            urlInput.dataset.hbrBeatport = 'true';
-            typeInput.dataset.hbrBeatport = 'true';
+            urlInput.dataset
+                .hbrBeatport =
+                'true';
+
+            typeInput.dataset
+                .hbrBeatport =
+                'true';
         }
 
         console.log(
@@ -756,7 +1107,10 @@
         );
     }
 
-    function injectBeatportIntoEditNote(form, release) {
+    function injectBeatportIntoEditNote(
+        form,
+        release
+    ) {
         if (!release.releaseUrl) {
             return;
         }
@@ -782,42 +1136,67 @@
         }
 
         let value =
-            editNote.value || '';
+            editNote.value ||
+            '';
 
         if (
             value.length &&
-            !value.endsWith('\n')
+            !value.endsWith(
+                '\n'
+            )
         ) {
-            value += '\n';
+            value +=
+                '\n';
         }
 
-        value += beatportLine;
+        value +=
+            beatportLine;
 
-        editNote.value = value;
+        editNote.value =
+            value;
 
         console.log(
             '[Harmony Beatport Recovery] Added Beatport to edit note.'
         );
     }
 
-    function patchMusicBrainzSeedForm(form, release) {
-        if (!form || !release) {
-            return;
-        }
-
-        const formName =
-            form.getAttribute('name');
-
+    function patchMusicBrainzSeedForm(
+        form,
+        release
+    ) {
         if (
-            formName !== 'release-seeder' &&
-            formName !== 'release-update-seeder'
+            !form ||
+            !release
         ) {
             return;
         }
 
         /*
-         * Both forms get Beatport external URLs + edit-note source.
+         * Beatport being unchecked is authoritative.
+         *
+         * Even if some stale result somehow survives in memory, never patch
+         * the MusicBrainz seed when the provider has been explicitly disabled.
          */
+        if (
+            !isHarmonyBeatportEnabled()
+        ) {
+            return;
+        }
+
+        const formName =
+            form.getAttribute(
+                'name'
+            );
+
+        if (
+            formName !==
+                'release-seeder' &&
+            formName !==
+                'release-update-seeder'
+        ) {
+            return;
+        }
+
         injectBeatportUrlIntoSeed(
             form,
             release
@@ -829,9 +1208,12 @@
         );
 
         /*
-         * Only the full release importer gets the Beatport catalog number.
+         * Only the full release importer gets the catalog number.
          */
-        if (formName === 'release-seeder') {
+        if (
+            formName ===
+            'release-seeder'
+        ) {
             injectCatalogNumberIntoReleaseSeed(
                 form,
                 release
@@ -839,14 +1221,25 @@
         }
     }
 
-    function patchAllMusicBrainzSeedForms(release) {
+    function patchAllMusicBrainzSeedForms(
+        release
+    ) {
+        if (
+            !isHarmonyBeatportEnabled()
+        ) {
+            return;
+        }
+
         const forms =
             document.querySelectorAll(
                 'form[name="release-seeder"], ' +
                 'form[name="release-update-seeder"]'
             );
 
-        for (const form of forms) {
+        for (
+            const form
+            of forms
+        ) {
             patchMusicBrainzSeedForm(
                 form,
                 release
@@ -855,10 +1248,6 @@
     }
 
     function setupSeederSubmitProtection() {
-        /*
-         * Reapply immediately before submission in case Harmony or another
-         * userscript has replaced any of the hidden inputs.
-         */
         document.addEventListener(
             'submit',
             event => {
@@ -868,9 +1257,21 @@
                     return;
                 }
 
-                const form = event.target;
+                if (
+                    !isHarmonyBeatportEnabled()
+                ) {
+                    return;
+                }
 
-                if (!(form instanceof HTMLFormElement)) {
+                const form =
+                    event.target;
+
+                if (
+                    !(
+                        form instanceof
+                        HTMLFormElement
+                    )
+                ) {
                     return;
                 }
 
@@ -887,31 +1288,48 @@
     // HARMONY — SUCCESS MESSAGE
     // =========================================================================
 
-    function convertBeatportMessageToSuccess(release) {
-        const message = findBeatportMessage();
+    function convertBeatportMessageToSuccess(
+        release
+    ) {
+        const message =
+            findBeatportMessage();
 
         if (!message) {
             return;
         }
 
-        message.dataset.hbrRecovered = 'true';
+        message.dataset
+            .hbrRecovered =
+            'true';
 
-        message.classList.remove('error');
+        message.classList.remove(
+            'error'
+        );
 
-        Object.assign(message.style, {
-            borderColor: '#4CAF50'
-        });
+        Object.assign(
+            message.style,
+            {
+                borderColor:
+                    '#4CAF50'
+            }
+        );
 
         const content =
-            getBeatportMessageContent(message);
+            getBeatportMessageContent(
+                message
+            );
 
         content.replaceChildren();
 
         const status =
-            document.createElement('p');
+            document.createElement(
+                'p'
+            );
 
         const statusStrong =
-            document.createElement('strong');
+            document.createElement(
+                'strong'
+            );
 
         statusStrong.textContent =
             'Beatport data recovered';
@@ -921,7 +1339,9 @@
         );
 
         const details =
-            document.createElement('div');
+            document.createElement(
+                'div'
+            );
 
         const addLine = (
             label,
@@ -937,19 +1357,29 @@
             }
 
             const line =
-                document.createElement('div');
+                document.createElement(
+                    'div'
+                );
 
             const strong =
-                document.createElement('strong');
+                document.createElement(
+                    'strong'
+                );
 
             strong.textContent =
                 `${label}: `;
 
-            line.appendChild(strong);
+            line.appendChild(
+                strong
+            );
 
-            if (options.url) {
+            if (
+                options.url
+            ) {
                 const link =
-                    document.createElement('a');
+                    document.createElement(
+                        'a'
+                    );
 
                 link.href =
                     options.url;
@@ -961,18 +1391,26 @@
                     'noopener noreferrer';
 
                 link.textContent =
-                    String(value);
+                    String(
+                        value
+                    );
 
-                line.appendChild(link);
+                line.appendChild(
+                    link
+                );
             } else {
                 line.appendChild(
                     document.createTextNode(
-                        String(value)
+                        String(
+                            value
+                        )
                     )
                 );
             }
 
-            details.appendChild(line);
+            details.appendChild(
+                line
+            );
         };
 
         addLine(
@@ -1007,7 +1445,8 @@
             'Beatport release',
             release.releaseId,
             {
-                url: release.releaseUrl
+                url:
+                    release.releaseUrl
             }
         );
 
@@ -1031,12 +1470,29 @@
     // HARMONY — APPLY RESULT
     // =========================================================================
 
-    function applyBeatportResult(result) {
+    function applyBeatportResult(
+        result
+    ) {
         if (
             !result ||
-            result.status !== 'success' ||
+            result.status !==
+                'success' ||
             !result.release
         ) {
+            return;
+        }
+
+        /*
+         * Beatport unchecked = explicitly do not use Beatport data.
+         */
+        if (
+            !isHarmonyBeatportEnabled()
+        ) {
+            console.log(
+                '[Harmony Beatport Recovery] ' +
+                'Ignoring Beatport result because Beatport is disabled in Harmony.'
+            );
+
             return;
         }
 
@@ -1045,8 +1501,12 @@
 
         if (
             !currentBarcode ||
-            normalizeBarcode(currentBarcode) !==
-            normalizeBarcode(result.request?.barcode)
+            normalizeBarcode(
+                currentBarcode
+            ) !==
+            normalizeBarcode(
+                result.request?.barcode
+            )
         ) {
             console.warn(
                 '[Harmony Beatport Recovery] ' +
@@ -1054,6 +1514,7 @@
                 'Harmony UPC does not match it.',
                 {
                     currentBarcode,
+
                     resultBarcode:
                         result.request?.barcode
                 }
@@ -1062,14 +1523,17 @@
             return;
         }
 
-        activeBeatportResult = result;
+        activeBeatportResult =
+            result;
 
         patchAllMusicBrainzSeedForms(
             result.release
         );
 
         const releaseContainer =
-            document.querySelector('.release');
+            document.querySelector(
+                '.release'
+            );
 
         const resultMarker =
             `${result.requestId}:${result.timestamp}`;
@@ -1099,7 +1563,9 @@
             result.release
         );
 
-        if (releaseContainer) {
+        if (
+            releaseContainer
+        ) {
             releaseContainer.dataset
                 .hbrAppliedResult =
                 resultMarker;
@@ -1111,13 +1577,35 @@
     // =========================================================================
 
     async function restoreExistingResult() {
+        /*
+         * This is the important cache escape hatch:
+         *
+         * If the user reruns Harmony with Beatport unchecked, treat that as
+         * an explicit request to discard any cached userscript Beatport data.
+         */
+        if (
+            !isHarmonyBeatportEnabled()
+        ) {
+            console.log(
+                '[Harmony Beatport Recovery] ' +
+                'Beatport is disabled for this lookup; cached recovery data will not be used.'
+            );
+
+            await clearBeatportRecoveryData();
+
+            return;
+        }
+
         const result =
             await GM_getValue(
                 RESULT_KEY,
                 null
             );
 
-        if (result?.status === 'success') {
+        if (
+            result?.status ===
+            'success'
+        ) {
             applyBeatportResult(
                 result
             );
@@ -1135,7 +1623,14 @@
             ) => {
                 if (
                     !newValue ||
-                    newValue.status !== 'success'
+                    newValue.status !==
+                        'success'
+                ) {
+                    return;
+                }
+
+                if (
+                    !isHarmonyBeatportEnabled()
                 ) {
                     return;
                 }
@@ -1148,6 +1643,8 @@
     }
 
     function initHarmony() {
+        setupBeatportCheckboxListener();
+
         addHarmonyButton();
 
         setupResultListener();
@@ -1157,30 +1654,53 @@
         restoreExistingResult();
 
         const observer =
-            new MutationObserver(() => {
-                addHarmonyButton();
+            new MutationObserver(
+                () => {
+                    /*
+                     * Harmony may rerender the provider controls.
+                     */
+                    setupBeatportCheckboxListener();
 
-                if (activeBeatportResult?.release) {
-                    patchAllMusicBrainzSeedForms(
-                        activeBeatportResult.release
-                    );
+                    addHarmonyButton();
 
-                    return;
-                }
-
-                GM_getValue(
-                    RESULT_KEY,
-                    null
-                ).then(result => {
+                    /*
+                     * Do absolutely nothing with cached Beatport data if the
+                     * user has explicitly disabled the provider.
+                     */
                     if (
-                        result?.status === 'success'
+                        !isHarmonyBeatportEnabled()
                     ) {
-                        applyBeatportResult(
-                            result
-                        );
+                        return;
                     }
-                });
-            });
+
+                    if (
+                        activeBeatportResult
+                            ?.release
+                    ) {
+                        patchAllMusicBrainzSeedForms(
+                            activeBeatportResult.release
+                        );
+
+                        return;
+                    }
+
+                    GM_getValue(
+                        RESULT_KEY,
+                        null
+                    ).then(
+                        result => {
+                            if (
+                                result?.status ===
+                                'success'
+                            ) {
+                                applyBeatportResult(
+                                    result
+                                );
+                            }
+                        }
+                    );
+                }
+            );
 
         observer.observe(
             document.body,
@@ -1196,77 +1716,120 @@
     // =========================================================================
 
     function findReleaseObjects(root) {
-        const results = [];
-        const seen = new Set();
+        const results =
+            [];
+
+        const seen =
+            new Set();
 
         function walk(value) {
             if (
                 !value ||
-                typeof value !== 'object'
+                typeof value !==
+                    'object'
             ) {
                 return;
             }
-
-            if (seen.has(value)) {
-                return;
-            }
-
-            seen.add(value);
 
             if (
-                !Array.isArray(value) &&
-                value.release_id != null &&
-                value.upc != null
+                seen.has(
+                    value
+                )
             ) {
-                results.push(value);
+                return;
             }
 
-            if (Array.isArray(value)) {
-                for (const item of value) {
-                    walk(item);
+            seen.add(
+                value
+            );
+
+            if (
+                !Array.isArray(
+                    value
+                ) &&
+                value.release_id !=
+                    null &&
+                value.upc !=
+                    null
+            ) {
+                results.push(
+                    value
+                );
+            }
+
+            if (
+                Array.isArray(
+                    value
+                )
+            ) {
+                for (
+                    const item
+                    of value
+                ) {
+                    walk(
+                        item
+                    );
                 }
             } else {
                 for (
                     const child
-                    of Object.values(value)
+                    of Object.values(
+                        value
+                    )
                 ) {
-                    walk(child);
+                    walk(
+                        child
+                    );
                 }
             }
         }
 
-        walk(root);
+        walk(
+            root
+        );
 
         return results;
     }
 
     function extractBeatportReleases() {
-        const unique = new Map();
+        const unique =
+            new Map();
 
         for (
             const script
-            of document.querySelectorAll('script')
+            of document.querySelectorAll(
+                'script'
+            )
         ) {
             const text =
-                script.textContent?.trim();
+                script.textContent
+                    ?.trim();
 
             if (!text) {
                 continue;
             }
 
             if (
-                !text.startsWith('{') &&
-                !text.startsWith('[')
+                !text.startsWith(
+                    '{'
+                ) &&
+                !text.startsWith(
+                    '['
+                )
             ) {
                 continue;
             }
 
             try {
                 const parsed =
-                    JSON.parse(text);
+                    JSON.parse(
+                        text
+                    );
 
                 const found =
-                    findReleaseObjects(parsed);
+                    findReleaseObjects(
+                        parsed
+                    );
 
                 for (
                     const release
@@ -1275,7 +1838,11 @@
                     const key =
                         `${release.release_id}:${release.upc}`;
 
-                    if (!unique.has(key)) {
+                    if (
+                        !unique.has(
+                            key
+                        )
+                    ) {
                         unique.set(
                             key,
                             release
@@ -1300,13 +1867,16 @@
         barcode
     ) {
         const target =
-            normalizeBarcode(barcode);
+            normalizeBarcode(
+                barcode
+            );
 
         return releases.filter(
             release =>
                 normalizeBarcode(
                     release.upc
-                ) === target
+                ) ===
+                target
         );
     }
 
@@ -1314,7 +1884,8 @@
         return (
             'https://www.beatport.com/release/' +
             `${slugify(
-                release.release_name || 'release'
+                release.release_name ||
+                'release'
             )}/${release.release_id}`
         );
     }
@@ -1322,31 +1893,40 @@
     function simplifyRelease(release) {
         return {
             releaseId:
-                release.release_id ?? null,
+                release.release_id ??
+                null,
 
             releaseName:
-                release.release_name ?? null,
+                release.release_name ??
+                null,
 
             upc:
-                release.upc ?? null,
+                release.upc ??
+                null,
 
             catalogNumber:
-                release.catalog_number ?? null,
+                release.catalog_number ??
+                null,
 
-            label: release.label
-                ? {
-                    id:
-                        release.label.label_id ??
-                        null,
+            label:
+                release.label
+                    ? {
+                        id:
+                            release.label
+                                .label_id ??
+                            null,
 
-                    name:
-                        release.label.label_name ??
-                        null
-                }
-                : null,
+                        name:
+                            release.label
+                                .label_name ??
+                            null
+                    }
+                    : null,
 
             artists:
-                Array.isArray(release.artists)
+                Array.isArray(
+                    release.artists
+                )
                     ? release.artists.map(
                         artist => ({
                             id:
@@ -1380,7 +1960,9 @@
                     : null,
 
             genres:
-                Array.isArray(release.genre)
+                Array.isArray(
+                    release.genre
+                )
                     ? release.genre.map(
                         genre => ({
                             id:
@@ -1395,7 +1977,9 @@
                     : [],
 
             tracks:
-                Array.isArray(release.tracks)
+                Array.isArray(
+                    release.tracks
+                )
                     ? release.tracks.map(
                         track => ({
                             id:
@@ -1410,7 +1994,9 @@
                     : [],
 
             keys:
-                Array.isArray(release.key)
+                Array.isArray(
+                    release.key
+                )
                     ? release.key.map(
                         key => ({
                             id:
@@ -1475,11 +2061,15 @@
         result
     ) {
         document
-            .getElementById(DEBUG_PANEL_ID)
+            .getElementById(
+                DEBUG_PANEL_ID
+            )
             ?.remove();
 
         const panel =
-            document.createElement('div');
+            document.createElement(
+                'div'
+            );
 
         panel.id =
             DEBUG_PANEL_ID;
@@ -1487,29 +2077,60 @@
         Object.assign(
             panel.style,
             {
-                position: 'fixed',
-                top: '20px',
-                right: '20px',
-                width: '420px',
-                maxHeight: '80vh',
-                overflow: 'auto',
-                zIndex: '2147483647',
-                background: '#181818',
-                color: '#fff',
-                border: '2px solid #ff9800',
-                borderRadius: '8px',
-                padding: '14px',
+                position:
+                    'fixed',
+
+                top:
+                    '20px',
+
+                right:
+                    '20px',
+
+                width:
+                    '420px',
+
+                maxHeight:
+                    '80vh',
+
+                overflow:
+                    'auto',
+
+                zIndex:
+                    '2147483647',
+
+                background:
+                    '#181818',
+
+                color:
+                    '#fff',
+
+                border:
+                    '2px solid #ff9800',
+
+                borderRadius:
+                    '8px',
+
+                padding:
+                    '14px',
+
                 boxShadow:
                     '0 4px 20px rgba(0,0,0,.65)',
+
                 fontFamily:
                     'Arial, sans-serif',
-                fontSize: '13px',
-                lineHeight: '1.4'
+
+                fontSize:
+                    '13px',
+
+                lineHeight:
+                    '1.4'
             }
         );
 
         const heading =
-            document.createElement('div');
+            document.createElement(
+                'div'
+            );
 
         heading.textContent =
             'Harmony Beatport Recovery';
@@ -1517,10 +2138,17 @@
         Object.assign(
             heading.style,
             {
-                color: '#ff9800',
-                fontWeight: 'bold',
-                fontSize: '16px',
-                marginBottom: '10px'
+                color:
+                    '#ff9800',
+
+                fontWeight:
+                    'bold',
+
+                fontSize:
+                    '16px',
+
+                marginBottom:
+                    '10px'
             }
         );
 
@@ -1533,13 +2161,17 @@
             value
         ) => {
             const row =
-                document.createElement('div');
+                document.createElement(
+                    'div'
+                );
 
             row.style.marginBottom =
                 '5px';
 
             const strong =
-                document.createElement('strong');
+                document.createElement(
+                    'strong'
+                );
 
             strong.textContent =
                 `${label}: `;
@@ -1549,7 +2181,9 @@
                 document.createTextNode(
                     value == null
                         ? '—'
-                        : String(value)
+                        : String(
+                            value
+                        )
                 )
             );
 
@@ -1574,7 +2208,9 @@
         );
 
         const divider =
-            document.createElement('hr');
+            document.createElement(
+                'hr'
+            );
 
         divider.style.borderColor =
             '#555';
@@ -1599,9 +2235,13 @@
 
     async function processBeatportPage() {
         const requestId =
-            new URL(location.href)
+            new URL(
+                location.href
+            )
                 .searchParams
-                .get('hbr');
+                .get(
+                    'hbr'
+                );
 
         /*
          * No HBR marker = ordinary Beatport browsing.
@@ -1618,7 +2258,8 @@
 
         if (
             !request ||
-            request.requestId !== requestId
+            request.requestId !==
+                requestId
         ) {
             console.log(
                 '[Harmony Beatport Recovery] ' +
@@ -1634,7 +2275,8 @@
             request
         );
 
-        let releases = [];
+        let releases =
+            [];
 
         for (
             let attempt = 1;
@@ -1644,11 +2286,15 @@
             releases =
                 extractBeatportReleases();
 
-            if (releases.length) {
+            if (
+                releases.length
+            ) {
                 break;
             }
 
-            await sleep(500);
+            await sleep(
+                500
+            );
         }
 
         console.log(
@@ -1671,7 +2317,10 @@
         // EXACTLY ONE MATCH = SUCCESS
         // ---------------------------------------------------------------------
 
-        if (matches.length === 1) {
+        if (
+            matches.length ===
+            1
+        ) {
             const release =
                 simplifyRelease(
                     matches[0]
@@ -1720,7 +2369,10 @@
         // MULTIPLE UPC MATCHES
         // ---------------------------------------------------------------------
 
-        if (matches.length > 1) {
+        if (
+            matches.length >
+            1
+        ) {
             const result = {
                 requestId:
                     request.requestId,
