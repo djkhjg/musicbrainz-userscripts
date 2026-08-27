@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Harmony: Beatport Recovery
 // @namespace    https://github.com/djkhjg/musicbrainz-userscripts
-// @version      0.4.2
-// @description  Recovers Beatport metadata for Harmony using Beatport's browser search results and adds it to MusicBrainz seeds.
+// @version      0.11.0
+// @description  Recovers and caches Beatport release and optional track metadata for Harmony.
 // @author       djkhjg
 // @license      MIT
 // @homepageURL  https://github.com/djkhjg/musicbrainz-userscripts/tree/main/harmony-beatport-recovery
@@ -11,317 +11,1017 @@
 // @updateURL    https://raw.githubusercontent.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
 // @match        https://harmony.pulsewidth.org.uk/release*
 // @match        https://harmony.mybrainz.dev/release*
-// @match        https://www.beatport.com/search*
-// @match        https://www.beatport.com/*/search*
+// @match        https://www.beatport.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        GM_openInTab
+// @grant        unsafeWindow
+// @run-at       document-start
 // ==/UserScript==
 
-(function () {
+(() => {
     'use strict';
 
-    const REQUEST_KEY = 'hbr-beatport-request';
-    const RESULT_KEY = 'hbr-beatport-result';
+    // Debug logging
+    const DEBUG_FOUND_RELEASES = false;
+    const DEBUG_CACHED_RELEASES = false;
 
-    const BUTTON_ID = 'hbr-beatport-search-button';
-    const LABEL_ALT_ID = 'hbr-beatport-label-alt';
-    const PROVIDER_ITEM_ID = 'hbr-beatport-provider-item';
-    const DEBUG_PANEL_ID = 'hbr-beatport-debug-panel';
+    // Script vars
+    const HELPER_SESSION_KEY = 'hbr-helper-session-v1';
+    const CACHE_INDEX_KEY = 'beatport-release-index';
+    const CACHE_PREFIX = 'beatport-release-';
+    const UPC_PREFIX = 'beatport-upc-';
+    const CACHE_LIMIT = 2000;
 
-    /*
-     * MusicBrainz release URL relationship types:
-     *
-     * 74  = purchase for download
-     * 980 = streaming page
-     */
-    const MB_PAID_DOWNLOAD_LINK_TYPE = '74';
-    const MB_STREAMING_LINK_TYPE = '980';
+    const TRACK_SETTING_KEY = 'hbr-setting-track-data';
+    const AUTO_SETTING_KEY = 'hbr-setting-auto';
 
-    let activeBeatportResult = null;
+    const LEVEL = { NONE: 0, RELEASE: 1, TRACKS: 2 };
+    const MB = { download: '74', streaming: '980' };
+    const NETWORK_CHANNEL = 'hbr-beatport-network-json-v1';
 
-    // =========================================================================
-    // GENERAL HELPERS
-    // =========================================================================
+    const IDS = {
+        button: 'hbr-beatport-search-button',
+        settings: 'hbr-beatport-settings',
+        trackSetting: 'hbr-setting-track-data',
+        autoSetting: 'hbr-setting-auto',
+        provider: 'hbr-beatport-provider-item',
+        label: 'hbr-beatport-label-alt',
+        trackCount: 'hbr-beatport-track-count',
+        helper: 'hbr-beatport-helper-panel'
+    };
 
-    function cleanText(value) {
-        return (value || '')
-            .replace(/\s+/g, ' ')
-            .trim();
+    const settings = { trackData: true, auto: false };
+
+    let passiveCacheQueue = Promise.resolve();
+    const beatportAssembly = new Map();
+
+    let activeRecord = null;
+    let watchedUPC = '';
+    let watchedReleaseId = '';
+    let harmonyUPCListener = null;
+    let harmonyReleaseListener = null;
+    let uiAppliedRecordStamp = '';
+    let controlsReadyUPC = '';
+    let activatedUPC = '';
+    let harmonyRuntimeReady = false;
+    let harmonyActivationPromise = null;
+    let harmonyCheckScheduled = false;
+    let uiApplying = false;
+    let autoStartedFor = null;
+
+    let helperSession = null;
+    let helperUPCListener = null;
+    let helperReleaseListener = null;
+    let helperReleaseId = '';
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    const $ = (selector, root = document) => root.querySelector(selector);
+    const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+    const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+    const barcode = value => String(value ?? '').replace(/\D/g, '').replace(/^0+/, '');
+
+    const normalizeName = value => String(value ?? '')
+        .normalize('NFKD')
+        .toLowerCase()
+        .replace(/[’‘]/g, "'")
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const slugify = value => String(value ?? '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[^\w\s-]/g, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-');
+
+    const isHarmony = () => [
+        'harmony.pulsewidth.org.uk',
+        'harmony.mybrainz.dev'
+    ].includes(location.hostname);
+
+    const isBeatport = () => location.hostname === 'www.beatport.com';
+
+    function requestId() {
+        return crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
 
-    function normalizeBarcode(value) {
-        return String(value || '')
-            .replace(/\D/g, '')
-            .replace(/^0+/, '');
-    }
+    function el(tag, props = {}, ...children) {
+        const node = document.createElement(tag);
 
-    function normalizeName(value) {
-        return String(value || '')
-            .normalize('NFKD')
-            .toLowerCase()
-            .replace(/[’‘]/g, "'")
-            .replace(/[^a-z0-9]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    function makeRequestId() {
-        if (crypto?.randomUUID) {
-            return crypto.randomUUID();
+        for (const [key, value] of Object.entries(props)) {
+            if (value == null) continue;
+            if (key === 'text') node.textContent = value;
+            else if (key === 'html') node.innerHTML = value;
+            else if (key === 'style') Object.assign(node.style, value);
+            else if (key === 'class') node.className = value;
+            else if (key in node) node[key] = value;
+            else node.setAttribute(key, value);
         }
 
-        return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        for (const child of children.flat()) {
+            if (child == null) continue;
+            node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+        }
+
+        return node;
     }
 
-    function slugify(value) {
-        return String(value || '')
-            .toLowerCase()
-            .normalize('NFKD')
-            .replace(/[^\w\s-]/g, '')
-            .trim()
-            .replace(/\s+/g, '-')
-            .replace(/-+/g, '-');
+    function beatportIcon(size = 24, stroke = 1.25) {
+        return el('span', {
+            class: 'beatport',
+            title: 'Beatport',
+            html: `<svg class="icon" width="${size}" height="${size}" stroke-width="${stroke}"><use xlink:href="/icon-sprite.svg#brand-beatport"></use></svg>`
+        });
     }
 
-    function createHiddenInput(form, name, value) {
-        const input = document.createElement('input');
+    function hidden(form, name, value) {
+        return form.appendChild(el('input', { type: 'hidden', name, value }));
+    }
 
-        input.type = 'hidden';
-        input.name = name;
-        input.value = value;
+    function walkJson(value, callback, seen = new Set()) {
+        if (!value || typeof value !== 'object' || seen.has(value)) return;
+        seen.add(value);
+        callback(value);
+        for (const child of Object.values(value)) walkJson(child, callback, seen);
+    }
 
-        form.appendChild(input);
+    function jsonRoots() {
+        const roots = [];
 
-        return input;
+        for (const script of $$('script')) {
+            const text = script.textContent?.trim();
+            if (!text || (!text.startsWith('{') && !text.startsWith('['))) continue;
+
+            try {
+                roots.push(JSON.parse(text));
+            } catch {
+                // Not JSON.
+            }
+        }
+
+        return roots;
     }
 
     // =========================================================================
-    // SITE DETECTION
+    // Cache reads
     // =========================================================================
 
-    function isHarmony() {
+    const cacheKey = releaseId => `${CACHE_PREFIX}${releaseId}`;
+    const upcKey = upc => `${UPC_PREFIX}${barcode(upc)}`;
+
+    function recordLevel(record) {
+        if (!record?.release) return LEVEL.NONE;
+
+        if (
+            Number(record.level) >= LEVEL.TRACKS ||
+            record.release.tracklistComplete
+        ) {
+            return LEVEL.TRACKS;
+        }
+
+        return LEVEL.RELEASE;
+    }
+
+    async function getCachedRelease(releaseId) {
+        if (releaseId == null) return null;
+        return GM_getValue(cacheKey(releaseId), null);
+    }
+
+    async function readCachedUPCState(upc) {
+        const wanted = barcode(upc);
+
+        if (!wanted) {
+            return {
+                status: 'miss',
+                releaseId: null,
+                record: null
+            };
+        }
+
+        const pointer =
+              await GM_getValue(
+                  upcKey(wanted),
+                  null
+              );
+
+        if (!pointer) {
+            return {
+                status: 'miss',
+                releaseId: null,
+                record: null
+            };
+        }
+
+        if (Array.isArray(pointer)) {
+            return {
+                status: 'ambiguous',
+                releaseId: null,
+                releaseIds:
+                [...new Set(pointer.map(String))],
+                record: null
+            };
+        }
+
+        const releaseId =
+              String(pointer);
+
+        const record =
+              await getCachedRelease(
+                  releaseId
+              );
+
+        if (!record?.release) {
+            return {
+                status: 'pending',
+                releaseId,
+                record: null
+            };
+        }
+
+        if (
+            barcode(record.release.upc) !==
+            wanted
+        ) {
+            return {
+                status: 'invalid',
+                releaseId,
+                record: null
+            };
+        }
+
+        return {
+            status: 'hit',
+            releaseId,
+            record
+        };
+    }
+
+    // =========================================================================
+    // Beatport-owned cache writes
+    // =========================================================================
+
+    async function loadCacheIndex() {
+        const index = await GM_getValue(CACHE_INDEX_KEY, {});
+
         return (
-            location.hostname === 'harmony.pulsewidth.org.uk' ||
-            location.hostname === 'harmony.mybrainz.dev'
+            index &&
+            typeof index === 'object' &&
+            !Array.isArray(index)
+        )
+            ? index
+            : {};
+    }
+
+    const saveCacheIndex = index => GM_setValue(CACHE_INDEX_KEY, index);
+
+    function trackListScore(tracks) {
+        if (!Array.isArray(tracks)) return 0;
+
+        return tracks.reduce(
+            (score, track) =>
+                score +
+                (Number.isFinite(Number(track?.id)) ? 1 : 0) +
+                (clean(track?.title) ? 2 : 0) +
+                (
+                    Array.isArray(track?.artists) &&
+                    track.artists.length
+                        ? 2
+                        : 0
+                ) +
+                (clean(track?.isrc) ? 3 : 0),
+            0
         );
     }
 
-    function isBeatport() {
-        return location.hostname === 'www.beatport.com';
+    function artistListScore(artists) {
+        if (!Array.isArray(artists)) return 0;
+
+        return artists.reduce(
+            (score, artist) =>
+                score +
+                (artist?.id != null ? 1 : 0) +
+                (clean(artist?.name) ? 1 : 0) +
+                (clean(artist?.type) ? 1 : 0),
+            0
+        );
     }
 
-    // =========================================================================
-    // HARMONY — CURRENT RELEASE DATA
-    // =========================================================================
-
-    function getReleaseTitle() {
-        const element = document.querySelector('.release-title');
-
-        return element
-            ? cleanText(element.textContent)
-            : '';
+    function hasReleaseValue(value) {
+        if (value == null || value === '') return false;
+        if (Array.isArray(value)) return value.length > 0;
+        if (typeof value === 'object') return Object.keys(value).length > 0;
+        return true;
     }
 
-    function getReleaseArtist() {
-        const container = document.querySelector('.release-artist');
+    function mergeRelease(existing, incoming, existingLevel, incomingLevel) {
+        const existingTrackScore = trackListScore(existing?.tracks);
+        const incomingTrackScore = trackListScore(incoming?.tracks);
 
-        if (!container) {
-            return '';
+        const preserveRicherLevel1 =
+            existingLevel === LEVEL.RELEASE &&
+            incomingLevel === LEVEL.RELEASE &&
+            existingTrackScore > 0 &&
+            incomingTrackScore === 0;
+
+        let merged;
+
+        if (preserveRicherLevel1) {
+            merged = { ...(existing || {}) };
+
+            for (const [key, value] of Object.entries(incoming || {})) {
+                if (!hasReleaseValue(merged[key]) && hasReleaseValue(value)) {
+                    merged[key] = value;
+                }
+            }
+        } else {
+            merged = {
+                ...(existing || {}),
+                ...(incoming || {})
+            };
         }
 
-        const artistCredit =
-            container.querySelector('.artist-credit') ||
-            container;
+        if (
+            !barcode(incoming?.upc) &&
+            barcode(existing?.upc)
+        ) {
+            merged.upc = existing.upc;
+        }
 
-        return cleanText(artistCredit.textContent);
+        if (
+            existingLevel === LEVEL.RELEASE &&
+            incomingLevel === LEVEL.RELEASE &&
+            artistListScore(existing?.artists) >
+            artistListScore(incoming?.artists)
+        ) {
+            merged.artists = existing.artists;
+        }
+
+        if (
+            existingLevel === LEVEL.RELEASE &&
+            incomingLevel === LEVEL.RELEASE &&
+            existingTrackScore > incomingTrackScore
+        ) {
+            merged.tracks = existing.tracks;
+        }
+
+        if (
+            existingLevel >= LEVEL.TRACKS &&
+            incomingLevel < LEVEL.TRACKS
+        ) {
+            merged.tracks = existing.tracks;
+            merged.tracklistComplete = true;
+        }
+
+        if (incomingLevel >= LEVEL.TRACKS) {
+            merged.tracks = incoming.tracks;
+            merged.tracklistComplete = true;
+        }
+
+        return merged;
     }
 
-    function getHarmonyBarcode() {
-        /*
-         * ONLY trust the GTIN displayed in the currently rendered Harmony
-         * result.
-         *
-         * Never trust #gtin-input here. Browser history can leave that input
-         * containing a barcode from an entirely different lookup.
-         */
-        const rows = document.querySelectorAll('.release-info tr');
+    async function addUpcPointer(upc, releaseId) {
+        const wanted = barcode(upc);
+        if (!wanted) return;
 
-        for (const row of rows) {
-            const heading = row.querySelector('th');
-            const value = row.querySelector('td');
+        const id = String(releaseId);
+        const key = upcKey(wanted);
+        const current = await GM_getValue(key, null);
 
-            if (!heading || !value) {
-                continue;
+        if (!current) {
+            await GM_setValue(key, id);
+            return;
+        }
+
+        if (Array.isArray(current)) {
+            const ids = [...new Set(current.map(String))];
+
+            if (!ids.includes(id)) {
+                ids.push(id);
+                await GM_setValue(key, ids);
             }
 
+            return;
+        }
+
+        if (String(current) !== id) {
+            await GM_setValue(key, [String(current), id]);
+        }
+    }
+
+    async function removeUpcPointer(upc, releaseId) {
+        const wanted = barcode(upc);
+        if (!wanted) return;
+
+        const id = String(releaseId);
+        const key = upcKey(wanted);
+        const current = await GM_getValue(key, null);
+
+        if (!current) return;
+
+        if (Array.isArray(current)) {
+            const remaining = current
+                .map(String)
+                .filter(value => value !== id);
+
+            if (!remaining.length) {
+                await GM_deleteValue(key);
+            } else if (remaining.length === 1) {
+                await GM_setValue(key, remaining[0]);
+            } else {
+                await GM_setValue(key, remaining);
+            }
+
+            return;
+        }
+
+        if (String(current) === id) {
+            await GM_deleteValue(key);
+        }
+    }
+
+    async function pruneCache(index) {
+        const entries = Object.entries(index);
+
+        if (entries.length <= CACHE_LIMIT) {
+            return index;
+        }
+
+        entries.sort(
+            (a, b) =>
+                (a[1].lastSeen || 0) -
+                (b[1].lastSeen || 0)
+        );
+
+        for (
+            const [releaseId, entry]
+            of entries.slice(0, entries.length - CACHE_LIMIT)
+        ) {
+            await GM_deleteValue(cacheKey(releaseId));
+            await removeUpcPointer(entry?.upc, releaseId);
+            delete index[releaseId];
+        }
+
+        return index;
+    }
+
+    function releaseDebugInfo(release) {
+        return {
+            id: release?.releaseId ?? null,
+            title: release?.releaseName ?? null,
+            upc: release?.upc ?? null,
+            catalogNumber: release?.catalogNumber ?? null,
+            label: release?.label?.name ?? null,
+            trackCount: release?.trackCount ?? null
+        };
+    }
+
+    async function cacheReleaseBatch(releases, level = LEVEL.RELEASE) {
+        const valid = releases.filter(release => release?.releaseId);
+        if (!valid.length) return new Map();
+
+        let index = await loadCacheIndex();
+        const saved = new Map();
+        const now = Date.now();
+
+        for (const release of valid) {
+            const releaseId = String(release.releaseId);
+            const existing = await getCachedRelease(releaseId);
+            const existingLevel = recordLevel(existing);
+            const finalLevel = Math.max(existingLevel, level);
+
+            const mergedRelease = mergeRelease(
+                existing?.release,
+                release,
+                existingLevel,
+                level
+            );
+
+            const oldUPC = barcode(existing?.release?.upc);
+            const newUPC = barcode(mergedRelease.upc);
+
+            const changed =
+                !existing ||
+                existingLevel !== finalLevel ||
+                JSON.stringify(existing.release) !== JSON.stringify(mergedRelease);
+
+            let record = existing;
+
+            if (changed) {
+                record = {
+                    level: finalLevel,
+                    updatedAt: now,
+                    release: mergedRelease
+                };
+
+                await GM_setValue(cacheKey(releaseId), record);
+
+                if (oldUPC && oldUPC !== newUPC) {
+                    await removeUpcPointer(oldUPC, releaseId);
+                }
+
+                if (newUPC) {
+                    await addUpcPointer(newUPC, releaseId);
+                }
+
+                if (DEBUG_CACHED_RELEASES) {
+                    const action = !existing
+                        ? 'new'
+                        : finalLevel > existingLevel
+                            ? 'upgraded'
+                            : 'updated';
+
+                    console.info(
+    '[Harmony Beatport Recovery] Cached Beatport release',
+    {
+        action,
+
+        incomingLevel:
+            level,
+
+        existingLevel,
+
+        storedLevel:
+            finalLevel,
+
+        incoming:
+            releaseDebugInfo(
+                release
+            ),
+
+        stored:
+            releaseDebugInfo(
+                mergedRelease
+            )
+    }
+);
+                }
+            }
+
+            index[releaseId] = {
+                upc: mergedRelease.upc || '',
+                level: finalLevel,
+                lastSeen: now
+            };
+
+            saved.set(releaseId, record);
+        }
+
+        index = await pruneCache(index);
+        await saveCacheIndex(index);
+
+        return saved;
+    }
+
+    async function cacheRelease(release, level) {
+        const saved = await cacheReleaseBatch([release], level);
+        return saved.get(String(release?.releaseId)) || null;
+    }
+
+    // =========================================================================
+    // Harmony release identity / settings
+    // =========================================================================
+
+    const releaseTitle = () => clean($('.release-title')?.textContent);
+
+    function releaseArtist() {
+        const container = $('.release-artist');
+
+        return clean(
+            container
+                ?.querySelector('.artist-credit')
+                ?.textContent ||
+            container?.textContent
+        );
+    }
+
+    function harmonyBarcode() {
+        for (const row of $$('.release-info tr')) {
             if (
-                cleanText(heading.textContent).toUpperCase() !== 'GTIN'
+                clean($('th', row)?.textContent).toUpperCase() === 'GTIN'
             ) {
-                continue;
-            }
-
-            const match = cleanText(value.textContent)
-                .match(/\d{8,14}/);
-
-            if (match) {
-                return match[0];
+                return (
+                    clean($('td', row)?.textContent)
+                        .match(/\d{8,14}/)?.[0] ||
+                    ''
+                );
             }
         }
 
         return '';
     }
 
-    function isHarmonyBeatportEnabled() {
-        const checkbox =
-            document.querySelector('#beatport-input');
+    const beatportEnabled = () => Boolean($('#beatport-input')?.checked);
 
-        return Boolean(
-            checkbox?.checked
-        );
-    }
-
-    function buildBeatportSearchUrl() {
-        const title = getReleaseTitle();
-        const artist = getReleaseArtist();
-
-        if (!title && !artist) {
-            return null;
-        }
-
-        const query = [title, artist]
+    function searchUrl() {
+        const query = [
+            releaseTitle(),
+            releaseArtist()
+        ]
             .filter(Boolean)
             .join(' ');
 
-        return (
-            'https://www.beatport.com/search?q=' +
-            encodeURIComponent(query)
-        );
+        return query
+            ? `https://www.beatport.com/search?q=${encodeURIComponent(query)}`
+            : null;
     }
 
-    // =========================================================================
-    // HARMONY — BEATPORT CACHE MANAGEMENT
-    // =========================================================================
-
-    async function clearBeatportRecoveryData() {
-        activeBeatportResult = null;
-
-        await GM_deleteValue(
-            REQUEST_KEY
-        );
-
-        await GM_deleteValue(
-            RESULT_KEY
-        );
-
-        console.log(
-            '[Harmony Beatport Recovery] ' +
-            'Cached Beatport recovery data cleared.'
-        );
+    async function loadSettings() {
+        settings.trackData = await GM_getValue(TRACK_SETTING_KEY, true);
+        settings.auto = await GM_getValue(AUTO_SETTING_KEY, false);
     }
 
-    function setupBeatportCheckboxListener() {
-        const checkbox =
-            document.querySelector('#beatport-input');
+    async function clearTransientState() {
+        stopHarmonyCacheWatch();
 
-        if (!checkbox) {
-            return;
-        }
+        activeRecord = null;
+        uiAppliedRecordStamp = '';
+        controlsReadyUPC = '';
+        autoStartedFor = null;
+    }
 
-        /*
-         * Prevent duplicate listeners if Harmony rerenders.
-         */
+    function currentRecord() {
         if (
-            checkbox.dataset
-                .hbrCheckboxListener ===
-            'true'
+            !activeRecord?.release ||
+            !beatportEnabled()
         ) {
-            return;
+            return null;
         }
 
-        checkbox.dataset
-            .hbrCheckboxListener =
-            'true';
-
-        checkbox.addEventListener(
-            'change',
-            async () => {
-                if (checkbox.checked) {
-                    return;
-                }
-
-                console.log(
-                    '[Harmony Beatport Recovery] ' +
-                    'Beatport unchecked; clearing cached recovery data.'
-                );
-
-                await clearBeatportRecoveryData();
-            }
-        );
+        return (
+            barcode(activeRecord.release.upc) ===
+            barcode(harmonyBarcode())
+        )
+            ? activeRecord
+            : null;
     }
 
-    // =========================================================================
-    // HARMONY — BEATPORT MESSAGE
-    // =========================================================================
+    const desiredLevel = () =>
+        settings.trackData
+            ? LEVEL.TRACKS
+            : LEVEL.RELEASE;
 
-    function findBeatportMessage() {
-        const messages = document.querySelectorAll('.message');
+    function lookupPlan() {
+        const record = currentRecord();
+        const have = recordLevel(record);
+        const want = desiredLevel();
 
-        for (const message of messages) {
-            const provider = message.querySelector('.provider');
+        if (
+            record?.release &&
+            have >= want
+        ) {
+            return {
+                kind: 'open',
+                targetLevel: want,
+                release: record.release
+            };
+        }
 
-            if (!provider) {
-                continue;
-            }
+        if (have === LEVEL.NONE) {
+            return {
+                kind: 'search',
+                targetLevel: want
+            };
+        }
 
-            const providerName = cleanText(provider.textContent)
-                .replace(/:$/, '')
-                .trim();
-
-            if (
-                providerName.toLowerCase() ===
-                'beatport'
-            ) {
-                return message;
-            }
+        if (
+            have === LEVEL.RELEASE &&
+            want === LEVEL.TRACKS
+        ) {
+            return {
+                kind: 'release',
+                targetLevel: LEVEL.TRACKS,
+                release: record.release
+            };
         }
 
         return null;
     }
 
-    function getBeatportMessageContent(message) {
-        return (
-            message.querySelector('.provider')?.nextElementSibling ||
-            message.lastElementChild ||
-            message
+    function setupBeatportCheckbox() {
+        const checkbox = $('#beatport-input');
+
+        if (
+            !checkbox ||
+            checkbox.dataset.hbrListener
+        ) {
+            return;
+        }
+
+        checkbox.dataset.hbrListener = '1';
+
+        checkbox.addEventListener(
+            'change',
+            async () => {
+                if (!checkbox.checked) {
+                    await clearTransientState();
+                    return;
+                }
+
+                activeRecord = null;
+                uiAppliedRecordStamp = '';
+                controlsReadyUPC = '';
+                autoStartedFor = null;
+
+                scheduleHarmonyCheck();
+            }
+        );
+    }
+
+    function beatportMessage() {
+        return $$('.message').find(
+            message =>
+                clean($('.provider', message)?.textContent)
+                    .replace(/:$/, '')
+                    .toLowerCase() === 'beatport'
+        );
+    }
+
+    const messageContent = message =>
+        $('.provider', message)?.nextElementSibling ||
+        message.lastElementChild ||
+        message;
+
+    function beatportFailureMessage() {
+        return $$('.message.error').find(
+            message => {
+                const provider = clean(
+                    $('.provider', message)?.textContent
+                )
+                    .replace(/:$/, '')
+                    .toLowerCase();
+
+                if (provider !== 'beatport') {
+                    return false;
+                }
+
+                return clean(
+                    messageContent(message)?.textContent
+                ).startsWith(
+                    'Failed to extract embedded JSON'
+                );
+            }
         );
     }
 
     // =========================================================================
-    // HARMONY — BUTTON
+    // Harmony settings / controls
     // =========================================================================
 
-    function createHarmonyButton() {
-        const button =
-            document.createElement('button');
+    function updateActionButton() {
+        const button = $('#' + IDS.button);
 
-        button.id =
-            BUTTON_ID;
+        if (!button) {
+            return;
+        }
 
-        button.type =
-            'button';
+        const have =
+              recordLevel(
+                  currentRecord()
+              );
+
+        const want =
+              desiredLevel();
+
+        button.disabled = false;
 
         button.textContent =
-            'Find on Beatport';
+            have === LEVEL.NONE
+            ? 'Find on Beatport'
+        : (
+            have < want
+            ? 'Retrieve track data'
+            : 'Open on Beatport'
+        );
+    }
 
-        Object.assign(
-            button.style,
+    function settingsPanel() {
+        const track = el('input', {
+            id: IDS.trackSetting,
+            type: 'checkbox',
+            checked: settings.trackData
+        });
+
+        const auto = el('input', {
+            id: IDS.autoSetting,
+            type: 'checkbox',
+            checked: settings.auto
+        });
+
+        track.addEventListener(
+            'change',
+            async () => {
+                settings.trackData = track.checked;
+
+                await GM_setValue(
+                    TRACK_SETTING_KEY,
+                    settings.trackData
+                );
+
+                autoStartedFor = null;
+                updateActionButton();
+
+                if (settings.auto) {
+                    maybeAutoLookup();
+                }
+            }
+        );
+
+        auto.addEventListener(
+            'change',
+            async () => {
+                settings.auto = auto.checked;
+
+                await GM_setValue(
+                    AUTO_SETTING_KEY,
+                    settings.auto
+                );
+
+                if (settings.auto) {
+                    maybeAutoLookup();
+                }
+            }
+        );
+
+        return el(
+            'div',
             {
+                id: IDS.settings,
+                style: {
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '6px 18px',
+                    marginTop: '8px',
+                    fontSize: '0.9em'
+                }
+            },
+            el(
+                'label',
+                {
+                    title:
+                        'Open the exact Beatport release page and retrieve track titles, artists and ISRCs.'
+                },
+                track,
+                ' Retrieve track data'
+            ),
+            el(
+                'label',
+                {
+                    title:
+                        'Automatically retrieve whatever Beatport information is still missing.'
+                },
+                auto,
+                ' Auto'
+            )
+        );
+    }
+
+    function ensureSettingsPanel(parent) {
+        const existing = $('#' + IDS.settings);
+
+        if (existing) {
+            const track = $('#' + IDS.trackSetting);
+            const auto = $('#' + IDS.autoSetting);
+
+            if (track) {
+                track.checked = settings.trackData;
+            }
+
+            if (auto) {
+                auto.checked = settings.auto;
+            }
+
+            return existing;
+        }
+
+        return parent.appendChild(settingsPanel());
+    }
+
+    function openBeatport(url) {
+        try {
+            if (
+                typeof GM_openInTab === 'function'
+            ) {
+                GM_openInTab(
+                    url,
+                    {
+                        active: true,
+                        insert: true,
+                        setParent: true
+                    }
+                );
+
+                return;
+            }
+        } catch {
+            // Fall through.
+        }
+
+        window.open(url, '_blank');
+    }
+
+    async function startLookup(
+    _button = null
+    ) {
+        if (!beatportEnabled()) {
+            return false;
+        }
+
+        const gtin =
+              barcode(
+                  harmonyBarcode()
+              );
+
+        if (!gtin) {
+            return false;
+        }
+
+        const plan =
+              lookupPlan();
+
+        if (!plan) {
+            return false;
+        }
+
+        /*
+     * Once the requested cache level is already available, this
+     * is ordinary browsing rather than a recovery session.
+     */
+        if (plan.kind === 'open') {
+            openBeatport(
+                plan.release.releaseUrl
+            );
+
+            return true;
+        }
+
+        let target;
+
+        if (plan.kind === 'release') {
+            target =
+                new URL(
+                plan.release.releaseUrl
+            );
+        } else {
+            const url =
+                  searchUrl();
+
+            if (!url) {
+                return false;
+            }
+
+            target =
+                new URL(url);
+        }
+
+        const id =
+              requestId();
+
+        target.searchParams.set(
+            'hbr',
+            id
+        );
+
+        target.searchParams.set(
+            'hbr_upc',
+            gtin
+        );
+
+        target.searchParams.set(
+            'hbr_level',
+            String(plan.targetLevel)
+        );
+
+        /*
+     * One helper tab owns the whole recovery attempt. If it finds
+     * Level 1 while Level 2 is wanted, that same tab will navigate
+     * itself to the exact release page.
+     */
+        autoStartedFor =
+            `${gtin}|${plan.targetLevel}`;
+
+        openBeatport(
+            target.toString()
+        );
+
+        return true;
+    }
+
+    function recoveryButton() {
+        const button = el('button', {
+            id: IDS.button,
+            type: 'button',
+            text: 'Find on Beatport',
+            style: {
                 marginTop: '8px',
                 padding: '6px 12px',
                 border: '1px solid #777',
@@ -330,954 +1030,1301 @@
                 fontSize: '0.9em',
                 fontWeight: 'bold'
             }
-        );
+        });
 
         button.addEventListener(
             'click',
-            async () => {
-                const searchUrl =
-                    buildBeatportSearchUrl();
-
-                const barcode =
-                    getHarmonyBarcode();
-
-                const title =
-                    getReleaseTitle();
-
-                const artist =
-                    getReleaseArtist();
-
-                if (!searchUrl) {
-                    alert(
-                        'Could not determine the Harmony release title or artist.'
-                    );
-
-                    return;
-                }
-
-                if (!barcode) {
-                    alert(
-                        'This Harmony result does not contain a UPC/GTIN.\n\n' +
-                        'Beatport Recovery cannot automatically identify the ' +
-                        'correct Beatport release without one.'
-                    );
-
-                    return;
-                }
-
-                const requestId =
-                    makeRequestId();
-
-                const request = {
-                    requestId,
-                    timestamp:
-                        Date.now(),
-                    barcode,
-                    title,
-                    artist,
-                    searchUrl
-                };
-
-                await GM_setValue(
-                    REQUEST_KEY,
-                    request
-                );
-
-                await GM_deleteValue(
-                    RESULT_KEY
-                );
-
-                console.log(
-                    '[Harmony Beatport Recovery] Created request:',
-                    request
-                );
-
-                button.textContent =
-                    'Waiting for Beatport…';
-
-                button.disabled =
-                    true;
-
-                const url =
-                    new URL(
-                        searchUrl
-                    );
-
-                url.searchParams.set(
-                    'hbr',
-                    requestId
-                );
-
-                window.open(
-                    url.toString(),
-                    '_blank'
-                );
-            }
+            () =>
+            startLookup(
+                button
+            )
         );
 
         return button;
     }
 
-    function addHarmonyButton() {
+    function ensureRecoveryControls() {
+        if (!beatportEnabled()) {
+            return false;
+        }
+
+        const message = beatportMessage();
+
+        if (!message) {
+            return false;
+        }
+
+        const content = messageContent(message);
+
+        ensureSettingsPanel(content);
+
+        if (!$('#' + IDS.button)) {
+            content.appendChild(
+                recoveryButton()
+            );
+        }
+
+        updateActionButton();
+        return true;
+    }
+
+    async function maybeAutoLookup() {
         if (
-            document.getElementById(
-                BUTTON_ID
-            )
+            !settings.auto ||
+            !beatportEnabled() ||
+            !beatportMessage()
+        ) {
+            return;
+        }
+
+        const plan =
+              lookupPlan();
+
+        if (
+            !plan ||
+            plan.kind === 'open'
         ) {
             return;
         }
 
         /*
-         * If Beatport is disabled in Harmony, do not add a recovery button.
-         */
+     * Deliberately ignore search/release stage here.
+     *
+     * One helper tab is responsible for the entire request. Once
+     * that helper discovers Level 1 it will navigate itself to the
+     * release page when Level 2 is required.
+     */
+        const key =
+              `${barcode(harmonyBarcode())}|${plan.targetLevel}`;
+
         if (
-            !isHarmonyBeatportEnabled()
+            autoStartedFor === key
         ) {
             return;
         }
 
-        const message =
-            findBeatportMessage();
+        autoStartedFor = key;
 
-        if (!message) {
-            return;
+        const started =
+              await startLookup(
+                  $('#' + IDS.button)
+              );
+
+        if (!started) {
+            autoStartedFor = null;
         }
-
-        if (
-            message.dataset
-                .hbrRecovered ===
-            'true'
-        ) {
-            return;
-        }
-
-        const content =
-            getBeatportMessageContent(
-                message
-            );
-
-        content.appendChild(
-            createHarmonyButton()
-        );
     }
 
     // =========================================================================
-    // HARMONY — PROVIDER DISPLAY
+    // Harmony release UI
     // =========================================================================
 
-    function injectBeatportProvider(release) {
-        const providerList =
-            document.querySelector(
-                '.provider-list'
-            );
+    function ensureProvider(release) {
+        const list = $('.provider-list');
 
-        if (!providerList) {
-            return;
-        }
+        if (!list) return;
 
-        let item =
-            document.getElementById(
-                PROVIDER_ITEM_ID
-            );
-
-        if (!item) {
-            item =
-                document.createElement(
-                    'li'
-                );
-
-            item.id =
-                PROVIDER_ITEM_ID;
-
-            item.dataset.provider =
-                'Beatport';
-
-            providerList.appendChild(
-                item
-            );
-        }
-
-        item.replaceChildren();
-
-        const icon =
-            document.createElement(
-                'span'
-            );
-
-        icon.className =
-            'beatport';
-
-        icon.title =
-            'Beatport';
-
-        icon.innerHTML = `
-            <svg class="icon" width="20" height="20" stroke-width="1.5">
-                <use xlink:href="/icon-sprite.svg#brand-beatport"></use>
-            </svg>
-        `;
-
-        const label =
-            document.createTextNode(
-                'Beatport: '
-            );
-
-        const link =
-            document.createElement(
-                'a'
-            );
-
-        link.className =
-            'provider-id';
-
-        link.href =
-            release.releaseUrl;
-
-        link.target =
-            '_blank';
-
-        link.rel =
-            'noopener noreferrer';
-
-        link.textContent =
-            release.releaseId;
-
-        const recovered =
-            document.createElement(
-                'span'
-            );
-
-        recovered.className =
-            'label ml-2';
-
-        recovered.textContent =
-            'Recovered by userscript';
-
-        item.append(
-            icon,
-            label,
-            link,
-            recovered
-        );
-    }
-
-    // =========================================================================
-    // HARMONY — LABEL / CATALOG NUMBER DISPLAY
-    // =========================================================================
-
-    function injectBeatportLabelAlternative(release) {
-        if (
-            !release.label?.name
-        ) {
-            return;
-        }
-
-        const rows =
-            document.querySelectorAll(
-                '.release-info tr'
-            );
-
-        let labelsCell =
-            null;
-
-        for (const row of rows) {
-            const heading =
-                row.querySelector(
-                    'th'
-                );
-
-            if (
-                heading &&
-                cleanText(
-                    heading.textContent
-                ).toLowerCase() ===
-                'labels'
-            ) {
-                labelsCell =
-                    row.querySelector(
-                        'td'
-                    );
-
-                break;
-            }
-        }
-
-        if (!labelsCell) {
-            return;
-        }
-
-        let altValues =
-            labelsCell.querySelector(
-                ':scope > ul.alt-values'
-            );
-
-        if (!altValues) {
-            altValues =
-                document.createElement(
-                    'ul'
-                );
-
-            altValues.className =
-                'alt-values';
-
-            labelsCell.appendChild(
-                altValues
-            );
-        }
-
-        let beatportEntry =
-            document.getElementById(
-                LABEL_ALT_ID
-            );
-
-        if (!beatportEntry) {
-            beatportEntry =
-                document.createElement(
-                    'li'
-                );
-
-            beatportEntry.id =
-                LABEL_ALT_ID;
-
-            altValues.appendChild(
-                beatportEntry
-            );
-        }
-
-        beatportEntry.replaceChildren();
-
-        const releaseLabels =
-            document.createElement(
-                'ul'
-            );
-
-        releaseLabels.className =
-            'release-labels inline';
-
-        const releaseLabel =
-            document.createElement(
-                'li'
-            );
-
-        const entityLinks =
-            document.createElement(
-                'span'
-            );
-
-        entityLinks.className =
-            'entity-links';
-
-        if (release.label.id) {
-            const labelLink =
-                document.createElement(
-                    'a'
-                );
-
-            labelLink.href =
-                'https://www.beatport.com/label/' +
-                `${slugify(
-                    release.label.name
-                )}/${release.label.id}`;
-
-            labelLink.target =
-                '_blank';
-
-            labelLink.rel =
-                'noopener noreferrer';
-
-            const smallIcon =
-                document.createElement(
-                    'span'
-                );
-
-            smallIcon.className =
-                'beatport';
-
-            smallIcon.title =
-                'Beatport';
-
-            smallIcon.innerHTML = `
-                <svg class="icon" width="18" height="18" stroke-width="1.5">
-                    <use xlink:href="/icon-sprite.svg#brand-beatport"></use>
-                </svg>
-            `;
-
-            labelLink.appendChild(
-                smallIcon
-            );
-
-            labelLink.appendChild(
-                document.createTextNode(
-                    release.label.name
-                )
-            );
-
-            entityLinks.appendChild(
-                labelLink
-            );
-        } else {
-            entityLinks.textContent =
-                release.label.name;
-        }
-
-        releaseLabel.appendChild(
-            entityLinks
-        );
+        let item = $('#' + IDS.provider);
 
         if (
-            release.catalogNumber
+            item?.dataset.releaseId ===
+            String(release.releaseId)
         ) {
-            releaseLabel.appendChild(
-                document.createTextNode(
-                    ` ${release.catalogNumber}`
-                )
-            );
+            return;
         }
 
-        releaseLabels.appendChild(
-            releaseLabel
+        item ||= list.appendChild(
+            el('li', {
+                id: IDS.provider
+            })
         );
 
-        const providerIcon =
-            document.createElement(
-                'span'
-            );
+        item.dataset.releaseId = release.releaseId;
 
-        providerIcon.className =
-            'beatport';
-
-        providerIcon.title =
-            'Beatport';
-
-        providerIcon.innerHTML = `
-            <svg class="icon" width="24" height="24" stroke-width="1.25">
-                <use xlink:href="/icon-sprite.svg#brand-beatport"></use>
-            </svg>
-        `;
-
-        beatportEntry.append(
-            releaseLabels,
-            providerIcon
+        item.replaceChildren(
+            beatportIcon(20, 1.5),
+            'Beatport: ',
+            el('a', {
+                class: 'provider-id',
+                href: release.releaseUrl,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+                text: release.releaseId
+            }),
+            el('span', {
+                class: 'label ml-2',
+                text: 'Recovered by userscript'
+            })
         );
     }
 
-    // =========================================================================
-    // HARMONY — MUSICBRAINZ SEED
-    // =========================================================================
+    function labelsCell({
+        create = false
+    } = {}) {
+        const table =
+              $('.release-info');
 
-    function getSeedLabels(form) {
-        const labels =
-            [];
-
-        for (
-            const input
-            of form.querySelectorAll(
-                'input[name]'
-            )
-        ) {
-            const match =
-                input.name.match(
-                    /^labels\.(\d+)\.name$/
-                );
-
-            if (!match) {
-                continue;
-            }
-
-            labels.push({
-                index:
-                    Number(
-                        match[1]
-                    ),
-
-                name:
-                    input.value
-            });
-        }
-
-        return labels;
-    }
-
-    function findSeedLabelIndex(
-        form,
-        beatportLabelName
-    ) {
-        const labels =
-            getSeedLabels(
-                form
-            );
-
-        if (!labels.length) {
+        if (!table) {
             return null;
         }
 
-        const normalizedBeatport =
-            normalizeName(
-                beatportLabelName
+        const existing =
+              $$('tr', table)
+        .find(
+            row =>
+            clean(
+                $('th', row)?.textContent
+            ).toLowerCase() ===
+            'labels'
+        );
+
+        if (existing) {
+            return $('td', existing);
+        }
+
+        if (!create) {
+            return null;
+        }
+
+        const tbody =
+              $('tbody', table) ||
+              table;
+
+        const row =
+              el(
+                  'tr',
+                  {
+                      'data-hbr-beatport':
+                      'labels-row'
+                  },
+                  el('th', {
+                      text: 'Labels'
+                  }),
+                  el('td')
+              );
+
+        /*
+     * Put the recovered label near the other release metadata.
+     */
+        tbody.appendChild(row);
+
+        return $('td', row);
+    }
+
+    function ensureLabelAlternative(release) {
+        if (!release.label?.name) {
+            return;
+        }
+
+        const cell =
+              labelsCell({
+                  create: true
+              });
+
+        if (!cell) return;
+
+        let alternatives = $(':scope > ul.alt-values', cell);
+
+        alternatives ||= cell.appendChild(
+            el('ul', {
+                class: 'alt-values'
+            })
+        );
+
+        let item = $('#' + IDS.label);
+
+        const signature =
+            `${release.label.id}|${release.label.name}|${release.catalogNumber}`;
+
+        if (
+            item?.dataset.signature === signature
+        ) {
+            return;
+        }
+
+        item ||= alternatives.appendChild(
+            el('li', {
+                id: IDS.label
+            })
+        );
+
+        item.dataset.signature = signature;
+
+        const labelContent = el('span', {
+            class: 'entity-links'
+        });
+
+        if (release.label.id) {
+            labelContent.append(
+                el(
+                    'a',
+                    {
+                        href:
+                            `https://www.beatport.com/label/` +
+                            `${slugify(release.label.name)}/${release.label.id}`,
+                        target: '_blank',
+                        rel: 'noopener noreferrer'
+                    },
+                    beatportIcon(18, 1.5),
+                    release.label.name
+                )
+            );
+        } else {
+            labelContent.textContent = release.label.name;
+        }
+
+        item.replaceChildren(
+            el(
+                'ul',
+                {
+                    class: 'release-labels inline'
+                },
+                el(
+                    'li',
+                    {},
+                    labelContent,
+                    release.catalogNumber
+                        ? ` ${release.catalogNumber}`
+                        : ''
+                )
+            ),
+            beatportIcon()
+        );
+    }
+
+    function ensureSuccessMessage(release) {
+        const message = beatportMessage();
+
+        if (!message) return;
+
+        const level =
+            recordLevel(currentRecord()) ||
+            (
+                release.tracklistComplete
+                    ? LEVEL.TRACKS
+                    : LEVEL.RELEASE
             );
 
-        const exactMatch =
-            labels.find(
-                label =>
-                    normalizeName(
-                        label.name
-                    ) ===
-                    normalizedBeatport
+        const signature =
+            `${release.releaseId}|${level}`;
+
+        if (
+            message.dataset.hbrRecovered === signature &&
+            $('#' + IDS.settings) &&
+            $('#' + IDS.button)
+        ) {
+            updateActionButton();
+            return;
+        }
+
+        message.dataset.hbrRecovered = signature;
+
+        message.classList.remove('error');
+        message.style.borderColor = '#4CAF50';
+
+        const details = el('div');
+
+        const line = (label, value, href = null) => {
+            if (
+                value == null ||
+                value === ''
+            ) {
+                return;
+            }
+
+            details.append(
+                el(
+                    'div',
+                    {},
+                    el('strong', {
+                        text: `${label}: `
+                    }),
+                    href
+                        ? el('a', {
+                            href,
+                            target: '_blank',
+                            rel: 'noopener noreferrer',
+                            text: value
+                        })
+                        : String(value)
+                )
+            );
+        };
+
+        line('Release', release.releaseName);
+
+        line(
+            'Artist',
+            release.artists
+                .map(artist => artist.name)
+                .filter(Boolean)
+                .join(', ')
+        );
+
+        line('UPC', release.upc);
+        line('Catalog number', release.catalogNumber);
+        line('Label', release.label?.name);
+
+        line(
+            'Beatport release',
+            release.releaseId,
+            release.releaseUrl
+        );
+
+        if (
+            release.tracklistComplete
+        ) {
+            line(
+                'Tracks pulled',
+                release.tracks.length
             );
 
-        if (exactMatch) {
-            return exactMatch.index;
+            line(
+                'ISRCs pulled',
+                release.tracks.filter(
+                    track => track.isrc
+                ).length
+            );
+        }
+
+        const content = messageContent(message);
+
+        content.replaceChildren(
+            el(
+                'p',
+                {},
+                el('strong', {
+                    text: 'Beatport data recovered'
+                })
+            ),
+            details
+        );
+
+        content.append(
+            settingsPanel(),
+            recoveryButton()
+        );
+
+        updateActionButton();
+    }
+
+    // =========================================================================
+    // Harmony track comparison
+    // =========================================================================
+
+    const altList = cell =>
+        $(':scope > ul.alt-values', cell) ||
+        cell.appendChild(
+            el('ul', {
+                class: 'alt-values'
+            })
+        );
+
+    function addTrackProviderIcon(
+    cell,
+     index,
+     field
+    ) {
+        const id =
+              `hbr-beatport-track-${index}-${field}-provider`;
+
+        if (
+            document.getElementById(id)
+        ) {
+            return;
+        }
+
+        const icon =
+              beatportIcon();
+
+        icon.id = id;
+
+        cell.append(
+            document.createTextNode(' '),
+            icon
+        );
+    }
+
+    function addTrackAlternative(
+    cell,
+     index,
+     field,
+     content
+    ) {
+        const id =
+              `hbr-beatport-track-${index}-${field}`;
+
+        let item =
+            $('#' + id);
+
+        item ||=
+            altList(cell)
+            .appendChild(
+            el('li', { id })
+        );
+
+        item.replaceChildren(
+            content,
+            beatportIcon()
+        );
+    }
+
+    function normalizedTrackText(value) {
+    return clean(value)
+        .normalize('NFKD')
+        .toLowerCase()
+        .replace(/[’‘]/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function harmonyTrackTitle(cell) {
+        /*
+     * Ignore Beatport alternatives that we may already have
+     * inserted into this cell.
+     */
+        const clone =
+              cell.cloneNode(true);
+
+        $$('.alt-values', clone)
+            .forEach(
+            node =>
+            node.remove()
+        );
+
+        $('[id^="hbr-beatport-track-"]', clone)
+            ?.remove();
+
+        return clean(
+            clone.textContent
+        );
+    }
+
+    function harmonyTrackArtists(cell) {
+        const clone =
+              cell.cloneNode(true);
+
+        $$('.alt-values', clone)
+            .forEach(
+            node =>
+            node.remove()
+        );
+
+        $('[id^="hbr-beatport-track-"]', clone)
+            ?.remove();
+
+        return clean(
+            clone.textContent
+        );
+    }
+
+    function harmonyTrackIsrc(cell) {
+        const clone =
+              cell.cloneNode(true);
+
+        $$('.alt-values', clone)
+            .forEach(
+            node =>
+            node.remove()
+        );
+
+        $('[id^="hbr-beatport-track-"]', clone)
+            ?.remove();
+
+        return clean(
+            clone.textContent
+        );
+    }
+
+    function beatportArtistText(track) {
+        return (track.artists || [])
+            .map(
+            artist =>
+            clean(artist.name)
+        )
+            .filter(Boolean)
+            .join(', ');
+    }
+
+    const trackUrl = track =>
+        track.id
+            ? `https://www.beatport.com/track/${slugify(track.title || 'track')}/${track.id}`
+            : null;
+
+    function artistNode(track) {
+        const wrapper = el('span', {
+            class: 'artist-credit'
+        });
+
+        const artists = track.artists || [];
+
+        if (!artists.length) {
+            wrapper.textContent = '—';
+            return wrapper;
+        }
+
+        artists.forEach(
+            (artist, index) => {
+                if (index) {
+                    wrapper.append(', ');
+                }
+
+                wrapper.append(
+                    artist.id
+                        ? el('a', {
+                            href:
+                                `https://www.beatport.com/artist/${slugify(artist.name)}/${artist.id}`,
+                            target: '_blank',
+                            rel: 'noopener noreferrer',
+                            text: artist.name
+                        })
+                        : (
+                            artist.name ||
+                            '—'
+                        )
+                );
+            }
+        );
+
+        return wrapper;
+    }
+
+    const isrcNode = isrc =>
+        isrc
+            ? el('code', {
+                class: 'isrc',
+                text: isrc
+            })
+            : document.createTextNode('—');
+
+    const nativeTrackRows = table =>
+        $$('tbody > tr', table)
+            .filter(
+                row =>
+                    !row.classList.contains(
+                        'hbr-beatport-extra-track'
+                    )
+            );
+
+    function clearTrackComparison(table) {
+        $$(
+            '[id^="hbr-beatport-track-"]',
+            table
+        ).forEach(
+            item => {
+                const parent =
+                      item.parentElement;
+
+                /*
+         * Remove the whitespace we inserted immediately before
+         * a matching provider icon.
+         */
+                if (
+                    item.id.endsWith(
+                        '-provider'
+                    ) &&
+                    item.previousSibling
+                    ?.nodeType ===
+                    Node.TEXT_NODE &&
+                    !item.previousSibling
+                    .textContent.trim()
+                ) {
+                    item.previousSibling.remove();
+                }
+
+                item.remove();
+
+                if (
+                    parent?.classList.contains(
+                        'alt-values'
+                    ) &&
+                    !parent.children.length
+                ) {
+                    parent.remove();
+                }
+            }
+        );
+
+        $$('.hbr-beatport-extra-track', table)
+            .forEach(row => row.remove());
+    }
+
+    function trackSignature(
+        release,
+        harmonyCount
+    ) {
+        return JSON.stringify([
+            release.releaseId,
+            harmonyCount,
+            release.tracks.map(
+                track => [
+                    track.id,
+                    track.title,
+                    track.isrc,
+                    track.artists?.map(
+                        artist => [
+                            artist.id,
+                            artist.name
+                        ]
+                    )
+                ]
+            )
+        ]);
+    }
+
+    function trackComparisonPresent(
+    table,
+     count
+    ) {
+        const compared = Math.min(
+            count,
+            nativeTrackRows(table).length
+        );
+
+        for (
+            let index = 0;
+            index < compared;
+            index++
+        ) {
+            const alternative =
+                  document.getElementById(
+                      `hbr-beatport-track-${index}-title`
+                  );
+
+            const provider =
+                  document.getElementById(
+                      `hbr-beatport-track-${index}-title-provider`
+                  );
+
+            if (
+                !alternative &&
+                !provider
+            ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function ensureTrackCount(
+        table,
+        beatportCount,
+        harmonyCount
+    ) {
+        const caption = $('caption', table);
+
+        if (!caption) return;
+
+        let label = $('#' + IDS.trackCount);
+
+        label ||= caption.appendChild(
+            el('span', {
+                id: IDS.trackCount,
+                class: 'label ml-2'
+            })
+        );
+
+        const matches =
+            beatportCount === harmonyCount;
+
+        label.textContent =
+            matches
+                ? `Beatport: ${beatportCount} tracks`
+                : `Beatport: ${beatportCount} tracks — Harmony: ${harmonyCount}`;
+
+        label.title =
+            matches
+                ? 'Beatport and Harmony contain the same number of tracks.'
+                : 'Beatport and Harmony have different track counts.';
+
+        label.style.backgroundColor =
+            matches ? '' : '#ff9800';
+
+        label.style.color =
+            matches ? '' : '#000';
+    }
+
+    function ensureTrackComparison(release) {
+        if (
+            !release.tracklistComplete ||
+            !Array.isArray(release.tracks)
+        ) {
+            return;
+        }
+
+        const table = $('table.tracklist');
+
+        if (!table) return;
+
+        const rows = nativeTrackRows(table);
+
+        const signature = trackSignature(
+            release,
+            rows.length
+        );
+
+        if (
+            table.dataset.hbrBeatportTrackSignature === signature &&
+            trackComparisonPresent(
+                table,
+                release.tracks.length
+            )
+        ) {
+            return;
+        }
+
+        table.dataset.hbrBeatportTrackSignature = signature;
+
+        clearTrackComparison(table);
+
+        ensureTrackCount(
+            table,
+            release.tracks.length,
+            rows.length
+        );
+
+        const compareCount = Math.min(
+            release.tracks.length,
+            rows.length
+        );
+
+        for (
+            let index = 0;
+            index < compareCount;
+            index++
+        ) {
+            const track = release.tracks[index];
+            const cells = $$(':scope > td', rows[index]);
+
+            if (cells.length < 5) {
+                continue;
+            }
+
+            const url =
+                  trackUrl(track);
+
+            //
+            // TITLE
+            //
+            const harmonyTitle =
+                  harmonyTrackTitle(
+                      cells[1]
+                  );
+
+            const beatportTitle =
+                  clean(
+                      track.title
+                  );
+
+            if (
+                beatportTitle &&
+                normalizedTrackText(
+                    harmonyTitle
+                ) ===
+                normalizedTrackText(
+                    beatportTitle
+                )
+            ) {
+                addTrackProviderIcon(
+                    cells[1],
+                    index,
+                    'title'
+                );
+            } else {
+                addTrackAlternative(
+                    cells[1],
+                    index,
+                    'title',
+                    url
+                    ? el('a', {
+                        href: url,
+                        target: '_blank',
+                        rel: 'noopener noreferrer',
+                        text:
+                        track.title ||
+                        '—'
+                    })
+                    : document.createTextNode(
+                        track.title ||
+                        '—'
+                    )
+                );
+            }
+
+
+            //
+            // ARTISTS
+            //
+            const harmonyArtists =
+                  harmonyTrackArtists(
+                      cells[2]
+                  );
+
+            const beatportArtists =
+                  beatportArtistText(
+                      track
+                  );
+
+            if (
+                beatportArtists &&
+                normalizedTrackText(
+                    harmonyArtists
+                ) ===
+                normalizedTrackText(
+                    beatportArtists
+                )
+            ) {
+                addTrackProviderIcon(
+                    cells[2],
+                    index,
+                    'artists'
+                );
+            } else {
+                addTrackAlternative(
+                    cells[2],
+                    index,
+                    'artists',
+                    artistNode(track)
+                );
+            }
+
+
+            //
+            // ISRC
+            //
+            const harmonyIsrc =
+                  harmonyTrackIsrc(
+                      cells[4]
+                  );
+
+            const beatportIsrc =
+                  clean(
+                      track.isrc
+                  );
+
+            if (
+                beatportIsrc &&
+                normalizedTrackText(
+                    harmonyIsrc
+                ) ===
+                normalizedTrackText(
+                    beatportIsrc
+                )
+            ) {
+                addTrackProviderIcon(
+                    cells[4],
+                    index,
+                    'isrc'
+                );
+            } else if (beatportIsrc) {
+                addTrackAlternative(
+                    cells[4],
+                    index,
+                    'isrc',
+                    isrcNode(
+                        track.isrc
+                    )
+                );
+            }
+        }
+
+        if (
+            release.tracks.length >
+            rows.length
+        ) {
+            const tbody = $('tbody', table);
+
+            for (
+                let index = rows.length;
+                index < release.tracks.length;
+                index++
+            ) {
+                const track = release.tracks[index];
+                const url = trackUrl(track);
+
+                tbody.append(
+                    el(
+                        'tr',
+                        {
+                            class:
+                                'hbr-beatport-extra-track',
+                            title:
+                                'This track exists in Beatport but has no corresponding Harmony row.'
+                        },
+                        el('td', {
+                            class: 'numeric',
+                            text: index + 1
+                        }),
+                        el(
+                            'td',
+                            {},
+                            url
+                                ? el('a', {
+                                    href: url,
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer',
+                                    text: track.title || '—'
+                                })
+                                : (
+                                    track.title ||
+                                    '—'
+                                ),
+                            beatportIcon()
+                        ),
+                        el(
+                            'td',
+                            {},
+                            artistNode(track),
+                            beatportIcon()
+                        ),
+                        el('td', {
+                            class: 'numeric',
+                            text: '—'
+                        }),
+                        el(
+                            'td',
+                            {},
+                            isrcNode(track.isrc),
+                            beatportIcon()
+                        )
+                    )
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // MusicBrainz seed
+    // =========================================================================
+
+    function seedLabels(form) {
+        return $$(
+            'input[name]',
+            form
+        )
+            .map(
+                input => {
+                    const match =
+                        input.name.match(
+                            /^labels\.(\d+)\.name$/
+                        );
+
+                    return match
+                        ? {
+                            index: Number(match[1]),
+                            name: input.value
+                        }
+                        : null;
+                }
+            )
+            .filter(Boolean);
+    }
+
+    function ensureSeedLabelIndex(
+    form,
+     release
+    ) {
+        const beatportLabel =
+              clean(
+                  release.label?.name
+              );
+
+        if (!beatportLabel) {
+            return null;
+        }
+
+        const labels =
+              seedLabels(form);
+
+        /*
+     * Best case: Harmony already seeded the same label.
+     */
+        const exact =
+              labels.find(
+                  label =>
+                  normalizeName(
+                      label.name
+                  ) ===
+                  normalizeName(
+                      beatportLabel
+                  )
+              );
+
+        if (exact) {
+            return exact.index;
         }
 
         /*
-         * If Harmony only has one label, associate the Beatport catalog number
-         * with that one label rather than guessing between multiple labels.
-         */
-        if (
-            labels.length ===
-            1
-        ) {
-            return labels[0].index;
-        }
+     * Harmony omitted the Beatport label.
+     *
+     * Don't attach Beatport's catalog number to some unrelated
+     * label. Add Beatport as a new label entry instead.
+     */
+        const index =
+              labels.length
+        ? Math.max(
+            ...labels.map(
+                label =>
+                label.index
+            )
+        ) + 1
+        : 0;
 
-        return null;
+        const input =
+              hidden(
+                  form,
+                  `labels.${index}.name`,
+                  beatportLabel
+              );
+
+        input.dataset.hbrBeatport =
+            '1';
+
+        return index;
     }
 
-    function injectCatalogNumberIntoReleaseSeed(
-        form,
-        release
+    function ensureCatalogNumber(
+    form,
+     release
     ) {
         if (
-            !release.catalogNumber ||
             !release.label?.name
         ) {
             return;
         }
 
-        const labelIndex =
-            findSeedLabelIndex(
-                form,
-                release.label.name
-            );
+        const index =
+              ensureSeedLabelIndex(
+                  form,
+                  release
+              );
 
-        if (
-            labelIndex ===
-            null
-        ) {
-            console.warn(
-                '[Harmony Beatport Recovery] ' +
-                'Could not safely determine which seeded label should ' +
-                'receive Beatport catalog number:',
-                release.catalogNumber
-            );
-
+        if (index == null) {
             return;
         }
 
-        const fieldName =
-            `labels.${labelIndex}.catalog_number`;
+        /*
+     * The label itself is worth seeding even when Beatport has no
+     * catalog number.
+     */
+        if (!release.catalogNumber) {
+            return;
+        }
+
+        const name =
+              `labels.${index}.catalog_number`;
 
         let input =
-            form.querySelector(
-                `input[name="${fieldName}"]`
+            $(
+                `input[name="${name}"]`,
+                form
             );
 
-        /*
-         * Never silently overwrite a different catalog number that Harmony
-         * already has.
-         */
-        if (
-            input?.value
-        ) {
+        if (input?.value) {
             if (
-                cleanText(
-                    input.value
-                ) !==
-                cleanText(
+                clean(input.value) !==
+                clean(
                     release.catalogNumber
                 )
             ) {
                 console.warn(
-                    '[Harmony Beatport Recovery] ' +
-                    'Harmony already has a different catalog number; ' +
-                    'leaving it unchanged.',
-                    {
-                        harmony:
-                            input.value,
-
-                        beatport:
-                            release.catalogNumber
-                    }
+                    '[Harmony Beatport Recovery] Catalog number conflict:',
+                    input.value,
+                    release.catalogNumber
                 );
             }
 
             return;
         }
 
-        if (!input) {
-            input =
-                createHiddenInput(
-                    form,
-                    fieldName,
-                    release.catalogNumber
-                );
-        } else {
-            input.value =
-                release.catalogNumber;
-        }
-
-        input.dataset
-            .hbrBeatport =
-            'true';
-
-        console.log(
-            '[Harmony Beatport Recovery] Seeded catalog number:',
+        input ||=
+            hidden(
+            form,
+            name,
             release.catalogNumber
         );
+
+        input.value =
+            release.catalogNumber;
+
+        input.dataset.hbrBeatport =
+            '1';
     }
 
-    function getSeedUrlEntries(form) {
-        const entries =
-            new Map();
+    function seedUrls(form) {
+        const result = new Map();
 
         for (
             const input
-            of form.querySelectorAll(
-                'input[name]'
-            )
+            of $$('input[name]', form)
         ) {
-            let match =
+            const match =
                 input.name.match(
-                    /^urls\.(\d+)\.url$/
+                    /^urls\.(\d+)\.(url|link_type)$/
                 );
 
-            if (match) {
-                const index =
-                    Number(
-                        match[1]
-                    );
+            if (!match) continue;
 
-                if (
-                    !entries.has(
-                        index
-                    )
-                ) {
-                    entries.set(
-                        index,
-                        {}
-                    );
+            const index = Number(match[1]);
+
+            result.set(
+                index,
+                {
+                    ...result.get(index),
+                    [
+                        match[2] === 'url'
+                            ? 'url'
+                            : 'type'
+                    ]: input.value
                 }
-
-                entries.get(
-                    index
-                ).url =
-                    input.value;
-
-                continue;
-            }
-
-            match =
-                input.name.match(
-                    /^urls\.(\d+)\.link_type$/
-                );
-
-            if (match) {
-                const index =
-                    Number(
-                        match[1]
-                    );
-
-                if (
-                    !entries.has(
-                        index
-                    )
-                ) {
-                    entries.set(
-                        index,
-                        {}
-                    );
-                }
-
-                entries.get(
-                    index
-                ).linkType =
-                    input.value;
-            }
-        }
-
-        return entries;
-    }
-
-    function injectBeatportUrlIntoSeed(
-        form,
-        release
-    ) {
-        if (!release.releaseUrl) {
-            return;
-        }
-
-        /*
-         * Beatport release pages are seeded as both:
-         *
-         * 74  = purchase for download
-         * 980 = streaming page
-         */
-        const wantedLinkTypes = [
-            MB_PAID_DOWNLOAD_LINK_TYPE,
-            MB_STREAMING_LINK_TYPE
-        ];
-
-        for (
-            const wantedType
-            of wantedLinkTypes
-        ) {
-            const entries =
-                getSeedUrlEntries(
-                    form
-                );
-
-            let alreadyExists =
-                false;
-
-            for (
-                const entry
-                of entries.values()
-            ) {
-                if (
-                    cleanText(
-                        entry.url
-                    ) ===
-                    cleanText(
-                        release.releaseUrl
-                    ) &&
-                    String(
-                        entry.linkType
-                    ) ===
-                    wantedType
-                ) {
-                    alreadyExists =
-                        true;
-
-                    break;
-                }
-            }
-
-            if (alreadyExists) {
-                continue;
-            }
-
-            let nextIndex =
-                0;
-
-            if (
-                entries.size
-            ) {
-                nextIndex =
-                    Math.max(
-                        ...entries.keys()
-                    ) + 1;
-            }
-
-            const urlInput =
-                createHiddenInput(
-                    form,
-                    `urls.${nextIndex}.url`,
-                    release.releaseUrl
-                );
-
-            const typeInput =
-                createHiddenInput(
-                    form,
-                    `urls.${nextIndex}.link_type`,
-                    wantedType
-                );
-
-            urlInput.dataset
-                .hbrBeatport =
-                'true';
-
-            typeInput.dataset
-                .hbrBeatport =
-                'true';
-        }
-
-        console.log(
-            '[Harmony Beatport Recovery] ' +
-            'Seeded Beatport purchase + streaming relationships:',
-            release.releaseUrl
-        );
-    }
-
-    function injectBeatportIntoEditNote(
-        form,
-        release
-    ) {
-        if (!release.releaseUrl) {
-            return;
-        }
-
-        const editNote =
-            form.querySelector(
-                'input[name="edit_note"], textarea[name="edit_note"]'
             );
+        }
 
-        if (!editNote) {
+        return result;
+    }
+
+    function ensureUrl(
+        form,
+        url,
+        type
+    ) {
+        const entries = seedUrls(form);
+
+        if (
+            [...entries.values()]
+                .some(
+                    entry =>
+                        clean(entry.url) === clean(url) &&
+                        String(entry.type) === String(type)
+                )
+        ) {
             return;
         }
 
-        const beatportLine =
+        const index =
+            entries.size
+                ? Math.max(...entries.keys()) + 1
+                : 0;
+
+        hidden(
+            form,
+            `urls.${index}.url`,
+            url
+        ).dataset.hbrBeatport = '1';
+
+        hidden(
+            form,
+            `urls.${index}.link_type`,
+            type
+        ).dataset.hbrBeatport = '1';
+    }
+
+    function ensureEditNote(
+        form,
+        release
+    ) {
+        const field = $('[name="edit_note"]', form);
+
+        if (!field) return;
+
+        const line =
             `* Beatport: ${release.releaseUrl}`;
 
         if (
-            editNote.value.includes(
-                beatportLine
-            )
+            !field.value.includes(line)
         ) {
-            return;
+            field.value +=
+                `${
+                    field.value &&
+                    !field.value.endsWith('\n')
+                        ? '\n'
+                        : ''
+                }${line}`;
         }
-
-        let value =
-            editNote.value ||
-            '';
-
-        if (
-            value.length &&
-            !value.endsWith(
-                '\n'
-            )
-        ) {
-            value +=
-                '\n';
-        }
-
-        value +=
-            beatportLine;
-
-        editNote.value =
-            value;
-
-        console.log(
-            '[Harmony Beatport Recovery] Added Beatport to edit note.'
-        );
     }
 
-    function patchMusicBrainzSeedForm(
+    function patchSeed(
         form,
         release
     ) {
         if (
-            !form ||
+            !beatportEnabled() ||
             !release
         ) {
             return;
         }
 
-        /*
-         * Beatport being unchecked is authoritative.
-         *
-         * Even if some stale result somehow survives in memory, never patch
-         * the MusicBrainz seed when the provider has been explicitly disabled.
-         */
-        if (
-            !isHarmonyBeatportEnabled()
-        ) {
-            return;
-        }
-
-        const formName =
-            form.getAttribute(
-                'name'
-            );
+        const name =
+            form.getAttribute('name');
 
         if (
-            formName !==
-                'release-seeder' &&
-            formName !==
+            ![
+                'release-seeder',
                 'release-update-seeder'
+            ].includes(name)
         ) {
             return;
         }
 
-        injectBeatportUrlIntoSeed(
+        ensureUrl(
+            form,
+            release.releaseUrl,
+            MB.download
+        );
+
+        ensureUrl(
+            form,
+            release.releaseUrl,
+            MB.streaming
+        );
+
+        ensureEditNote(
             form,
             release
         );
 
-        injectBeatportIntoEditNote(
-            form,
-            release
-        );
-
-        /*
-         * Only the full release importer gets the catalog number.
-         */
         if (
-            formName ===
-            'release-seeder'
+            name === 'release-seeder'
         ) {
-            injectCatalogNumberIntoReleaseSeed(
+            ensureCatalogNumber(
                 form,
                 release
             );
         }
     }
 
-    function patchAllMusicBrainzSeedForms(
-        release
-    ) {
-        if (
-            !isHarmonyBeatportEnabled()
-        ) {
-            return;
-        }
-
-        const forms =
-            document.querySelectorAll(
-                'form[name="release-seeder"], ' +
-                'form[name="release-update-seeder"]'
-            );
-
-        for (
-            const form
-            of forms
-        ) {
-            patchMusicBrainzSeedForm(
-                form,
-                release
-            );
-        }
+    function patchSeeds(release) {
+        $$(
+            'form[name="release-seeder"], form[name="release-update-seeder"]'
+        ).forEach(
+            form =>
+                patchSeed(
+                    form,
+                    release
+                )
+        );
     }
 
-    function setupSeederSubmitProtection() {
+    function setupSubmitProtection() {
         document.addEventListener(
             'submit',
             event => {
-                if (
-                    !activeBeatportResult?.release
-                ) {
-                    return;
-                }
+                const record = currentRecord();
 
                 if (
-                    !isHarmonyBeatportEnabled()
-                ) {
-                    return;
-                }
-
-                const form =
-                    event.target;
-
-                if (
+                    !record?.release ||
                     !(
-                        form instanceof
+                        event.target instanceof
                         HTMLFormElement
                     )
                 ) {
                     return;
                 }
 
-                patchMusicBrainzSeedForm(
-                    form,
-                    activeBeatportResult.release
+                patchSeed(
+                    event.target,
+                    record.release
                 );
             },
             true
@@ -1285,730 +2332,607 @@
     }
 
     // =========================================================================
-    // HARMONY — SUCCESS MESSAGE
+    // Harmony cache monitoring
     // =========================================================================
 
-    function convertBeatportMessageToSuccess(
-        release
-    ) {
-        const message =
-            findBeatportMessage();
-
-        if (!message) {
+    function removeGMListener(listenerId) {
+        if (listenerId == null) {
             return;
         }
 
-        message.dataset
-            .hbrRecovered =
-            'true';
+        try {
+            GM_removeValueChangeListener(
+                listenerId
+            );
+        } catch {
+            // Listener may already be gone.
+        }
+    }
 
-        message.classList.remove(
-            'error'
+    function clearHarmonyReleaseWatch() {
+        removeGMListener(
+            harmonyReleaseListener
         );
 
-        Object.assign(
-            message.style,
-            {
-                borderColor:
-                    '#4CAF50'
-            }
+        harmonyReleaseListener = null;
+        watchedReleaseId = '';
+    }
+
+    function stopHarmonyCacheWatch() {
+        removeGMListener(
+            harmonyUPCListener
         );
 
-        const content =
-            getBeatportMessageContent(
-                message
+        harmonyUPCListener = null;
+        watchedUPC = '';
+
+        clearHarmonyReleaseWatch();
+    }
+
+    function applyHarmonyCachedRecord(
+    wantedUPC,
+     releaseId,
+     record
+    ) {
+        if (
+            watchedUPC !== wantedUPC ||
+            watchedReleaseId !== String(releaseId)
+        ) {
+            return;
+        }
+
+        const valid =
+              record?.release &&
+              barcode(record.release.upc) ===
+              wantedUPC;
+
+        activeRecord =
+            valid
+            ? record
+        : null;
+
+        uiAppliedRecordStamp = '';
+        controlsReadyUPC = '';
+
+        scheduleHarmonyCheck();
+    }
+
+    async function watchHarmonyRelease(
+    wantedUPC,
+     releaseId
+    ) {
+        const id =
+              String(releaseId);
+
+        if (
+            watchedReleaseId !== id
+        ) {
+            clearHarmonyReleaseWatch();
+
+            watchedReleaseId = id;
+
+            harmonyReleaseListener =
+                GM_addValueChangeListener(
+                cacheKey(id),
+                (
+                    _key,
+                    _oldValue,
+                    newValue
+                ) =>
+                applyHarmonyCachedRecord(
+                    wantedUPC,
+                    id,
+                    newValue
+                )
             );
+        }
 
-        content.replaceChildren();
+        const record =
+              await getCachedRelease(id);
 
-        const status =
-            document.createElement(
-                'p'
-            );
+        if (
+            watchedUPC !== wantedUPC ||
+            watchedReleaseId !== id
+        ) {
+            return;
+        }
 
-        const statusStrong =
-            document.createElement(
-                'strong'
-            );
+        const valid =
+              record?.release &&
+              barcode(record.release.upc) ===
+              wantedUPC;
 
-        statusStrong.textContent =
-            'Beatport data recovered';
+        activeRecord =
+            valid
+            ? record
+        : null;
 
-        status.appendChild(
-            statusStrong
+        uiAppliedRecordStamp = '';
+        controlsReadyUPC = '';
+    }
+
+    async function refreshHarmonyUPCWatch(
+    wantedUPC
+    ) {
+        if (
+            watchedUPC !== wantedUPC
+        ) {
+            return;
+        }
+
+        const state =
+              await readCachedUPCState(
+                  wantedUPC
+              );
+
+        if (
+            watchedUPC !== wantedUPC
+        ) {
+            return;
+        }
+
+        if (
+            !state.releaseId ||
+            state.status === 'ambiguous'
+        ) {
+            clearHarmonyReleaseWatch();
+
+            activeRecord = null;
+            uiAppliedRecordStamp = '';
+            controlsReadyUPC = '';
+
+            scheduleHarmonyCheck();
+            return;
+        }
+
+        await watchHarmonyRelease(
+            wantedUPC,
+            state.releaseId
         );
 
-        const details =
-            document.createElement(
-                'div'
-            );
+        scheduleHarmonyCheck();
+    }
 
-        const addLine = (
-            label,
-            value,
-            options = {}
-        ) => {
+    async function ensureHarmonyCacheWatch(upc) {
+        const wanted =
+              barcode(upc);
+
+        if (!wanted) {
+            stopHarmonyCacheWatch();
+            return;
+        }
+
+        if (
+            watchedUPC === wanted &&
+            harmonyUPCListener != null
+        ) {
+            return;
+        }
+
+        stopHarmonyCacheWatch();
+
+        watchedUPC = wanted;
+
+        harmonyUPCListener =
+            GM_addValueChangeListener(
+            upcKey(wanted),
+            () =>
+            refreshHarmonyUPCWatch(
+                wanted
+            ).catch(
+                error =>
+                console.warn(
+                    '[Harmony Beatport Recovery] Could not refresh watched Beatport UPC.',
+                    error
+                )
+            )
+        );
+
+        await refreshHarmonyUPCWatch(
+            wanted
+        );
+    }
+
+    async function activateHarmony(upc) {
+        if (
+            activatedUPC === upc &&
+            harmonyRuntimeReady
+        ) {
+            return;
+        }
+
+        if (harmonyActivationPromise) {
+            await harmonyActivationPromise;
+
             if (
-                value === null ||
-                value === undefined ||
-                value === ''
+                activatedUPC === upc
             ) {
                 return;
             }
+        }
 
-            const line =
-                document.createElement(
-                    'div'
-                );
+        harmonyActivationPromise =
+            (async () => {
+            stopHarmonyCacheWatch();
 
-            const strong =
-                document.createElement(
-                    'strong'
-                );
+            activatedUPC = upc;
+            activeRecord = null;
+            uiAppliedRecordStamp = '';
+            controlsReadyUPC = '';
+            autoStartedFor = null;
 
-            strong.textContent =
-                `${label}: `;
+            if (!harmonyRuntimeReady) {
+                await loadSettings();
+                setupSubmitProtection();
 
-            line.appendChild(
-                strong
+                harmonyRuntimeReady = true;
+            }
+
+            setupBeatportCheckbox();
+
+            console.debug(
+                `[Harmony Beatport Recovery] Activated after native Beatport failure for UPC ${upc}.`
             );
+        })();
+
+        try {
+            await harmonyActivationPromise;
+        } finally {
+            harmonyActivationPromise = null;
+        }
+    }
+
+    function syncRecoveredUi(release) {
+        if (uiApplying) {
+            return;
+        }
+
+        uiApplying = true;
+
+        try {
+            ensureSuccessMessage(
+                release
+            );
+
+            ensureProvider(
+                release
+            );
+
+            ensureLabelAlternative(
+                release
+            );
+
+            ensureTrackComparison(
+                release
+            );
+
+            patchSeeds(
+                release
+            );
+        } finally {
+            uiApplying = false;
+        }
+    }
+
+    function harmonyUiReady(record) {
+        if (
+            !beatportMessage() ||
+            !$('.provider-list')
+        ) {
+            return false;
+        }
+
+        if (
+            recordLevel(record) >= LEVEL.TRACKS &&
+            !$('table.tracklist')
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function harmonyRecordStamp(record) {
+        if (!record?.release) {
+            return '';
+        }
+
+        return [
+            record.release.releaseId,
+            recordLevel(record),
+            record.updatedAt || 0
+        ].join('|');
+    }
+
+    async function checkHarmonyState() {
+        const upc =
+              barcode(
+                  harmonyBarcode()
+              );
+
+        if (!upc) {
+            return;
+        }
+
+        /*
+     * Preserve the strict activation rule:
+     *
+     * - Harmony must have rendered a UPC
+     * - its native Beatport provider must have failed with the
+     *   expected "Failed to extract embedded JSON" error
+     */
+        if (
+            activatedUPC !== upc
+        ) {
+            if (!beatportFailureMessage()) {
+                return;
+            }
+
+            await activateHarmony(upc);
+        }
+
+        if (
+            activatedUPC !== upc ||
+            !harmonyRuntimeReady
+        ) {
+            return;
+        }
+
+        setupBeatportCheckbox();
+
+        if (!beatportEnabled()) {
+            return;
+        }
+
+        /*
+     * From this point onward Harmony never performs another
+     * Beatport lookup. It simply watches the UPC pointer and,
+     * once known, that release's cache record.
+     */
+        await ensureHarmonyCacheWatch(
+            upc
+        );
+
+        if (activeRecord?.release) {
+            const stamp =
+                  harmonyRecordStamp(
+                      activeRecord
+                  );
 
             if (
-                options.url
+                uiAppliedRecordStamp !== stamp &&
+                harmonyUiReady(activeRecord)
             ) {
-                const link =
-                    document.createElement(
-                        'a'
-                    );
-
-                link.href =
-                    options.url;
-
-                link.target =
-                    '_blank';
-
-                link.rel =
-                    'noopener noreferrer';
-
-                link.textContent =
-                    String(
-                        value
-                    );
-
-                line.appendChild(
-                    link
+                syncRecoveredUi(
+                    activeRecord.release
                 );
-            } else {
-                line.appendChild(
-                    document.createTextNode(
-                        String(
-                            value
-                        )
+
+                uiAppliedRecordStamp =
+                    stamp;
+            }
+
+            if (beatportMessage()) {
+                await maybeAutoLookup();
+            }
+
+            return;
+        }
+
+        if (beatportMessage()) {
+            if (
+                controlsReadyUPC !== upc &&
+                ensureRecoveryControls()
+            ) {
+                controlsReadyUPC = upc;
+            }
+
+            await maybeAutoLookup();
+        }
+    }
+
+    function scheduleHarmonyCheck() {
+        if (
+            uiApplying ||
+            harmonyCheckScheduled
+        ) {
+            return;
+        }
+
+        harmonyCheckScheduled = true;
+
+        requestAnimationFrame(
+            () => {
+                harmonyCheckScheduled = false;
+
+                checkHarmonyState()
+                    .catch(
+                    error =>
+                    console.warn(
+                        '[Harmony Beatport Recovery] Harmony state check failed.',
+                        error
                     )
-                );
-            }
-
-            details.appendChild(
-                line
-            );
-        };
-
-        addLine(
-            'Release',
-            release.releaseName
-        );
-
-        addLine(
-            'Artist',
-            release.artists
-                .map(a => a.name)
-                .filter(Boolean)
-                .join(', ')
-        );
-
-        addLine(
-            'UPC',
-            release.upc
-        );
-
-        addLine(
-            'Catalog number',
-            release.catalogNumber
-        );
-
-        addLine(
-            'Label',
-            release.label?.name
-        );
-
-        addLine(
-            'Beatport release',
-            release.releaseId,
-            {
-                url:
-                    release.releaseUrl
-            }
-        );
-
-        content.append(
-            status,
-            details
-        );
-
-        const retryButton =
-            createHarmonyButton();
-
-        retryButton.textContent =
-            'Search Beatport again';
-
-        content.appendChild(
-            retryButton
-        );
-    }
-
-    // =========================================================================
-    // HARMONY — APPLY RESULT
-    // =========================================================================
-
-    function applyBeatportResult(
-        result
-    ) {
-        if (
-            !result ||
-            result.status !==
-                'success' ||
-            !result.release
-        ) {
-            return;
-        }
-
-        /*
-         * Beatport unchecked = explicitly do not use Beatport data.
-         */
-        if (
-            !isHarmonyBeatportEnabled()
-        ) {
-            console.log(
-                '[Harmony Beatport Recovery] ' +
-                'Ignoring Beatport result because Beatport is disabled in Harmony.'
-            );
-
-            return;
-        }
-
-        const currentBarcode =
-            getHarmonyBarcode();
-
-        if (
-            !currentBarcode ||
-            normalizeBarcode(
-                currentBarcode
-            ) !==
-            normalizeBarcode(
-                result.request?.barcode
-            )
-        ) {
-            console.warn(
-                '[Harmony Beatport Recovery] ' +
-                'Ignoring stored result because the currently rendered ' +
-                'Harmony UPC does not match it.',
-                {
-                    currentBarcode,
-
-                    resultBarcode:
-                        result.request?.barcode
-                }
-            );
-
-            return;
-        }
-
-        activeBeatportResult =
-            result;
-
-        patchAllMusicBrainzSeedForms(
-            result.release
-        );
-
-        const releaseContainer =
-            document.querySelector(
-                '.release'
-            );
-
-        const resultMarker =
-            `${result.requestId}:${result.timestamp}`;
-
-        if (
-            releaseContainer?.dataset
-                .hbrAppliedResult ===
-            resultMarker
-        ) {
-            return;
-        }
-
-        console.log(
-            '[Harmony Beatport Recovery] Applying Beatport result:',
-            result
-        );
-
-        convertBeatportMessageToSuccess(
-            result.release
-        );
-
-        injectBeatportProvider(
-            result.release
-        );
-
-        injectBeatportLabelAlternative(
-            result.release
-        );
-
-        if (
-            releaseContainer
-        ) {
-            releaseContainer.dataset
-                .hbrAppliedResult =
-                resultMarker;
-        }
-    }
-
-    // =========================================================================
-    // HARMONY — INITIALIZATION
-    // =========================================================================
-
-    async function restoreExistingResult() {
-        /*
-         * This is the important cache escape hatch:
-         *
-         * If the user reruns Harmony with Beatport unchecked, treat that as
-         * an explicit request to discard any cached userscript Beatport data.
-         */
-        if (
-            !isHarmonyBeatportEnabled()
-        ) {
-            console.log(
-                '[Harmony Beatport Recovery] ' +
-                'Beatport is disabled for this lookup; cached recovery data will not be used.'
-            );
-
-            await clearBeatportRecoveryData();
-
-            return;
-        }
-
-        const result =
-            await GM_getValue(
-                RESULT_KEY,
-                null
-            );
-
-        if (
-            result?.status ===
-            'success'
-        ) {
-            applyBeatportResult(
-                result
-            );
-        }
-    }
-
-    function setupResultListener() {
-        GM_addValueChangeListener(
-            RESULT_KEY,
-            (
-                name,
-                oldValue,
-                newValue,
-                remote
-            ) => {
-                if (
-                    !newValue ||
-                    newValue.status !==
-                        'success'
-                ) {
-                    return;
-                }
-
-                if (
-                    !isHarmonyBeatportEnabled()
-                ) {
-                    return;
-                }
-
-                applyBeatportResult(
-                    newValue
                 );
             }
         );
     }
 
     function initHarmony() {
-        setupBeatportCheckboxListener();
-
-        addHarmonyButton();
-
-        setupResultListener();
-
-        setupSeederSubmitProtection();
-
-        restoreExistingResult();
-
-        const observer =
-            new MutationObserver(
-                () => {
-                    /*
-                     * Harmony may rerender the provider controls.
-                     */
-                    setupBeatportCheckboxListener();
-
-                    addHarmonyButton();
-
-                    /*
-                     * Do absolutely nothing with cached Beatport data if the
-                     * user has explicitly disabled the provider.
-                     */
-                    if (
-                        !isHarmonyBeatportEnabled()
-                    ) {
-                        return;
-                    }
-
-                    if (
-                        activeBeatportResult
-                            ?.release
-                    ) {
-                        patchAllMusicBrainzSeedForms(
-                            activeBeatportResult.release
-                        );
-
-                        return;
-                    }
-
-                    GM_getValue(
-                        RESULT_KEY,
-                        null
-                    ).then(
-                        result => {
-                            if (
-                                result?.status ===
-                                'success'
-                            ) {
-                                applyBeatportResult(
-                                    result
-                                );
-                            }
-                        }
-                    );
-                }
-            );
-
-        observer.observe(
+        new MutationObserver(
+            () =>
+            scheduleHarmonyCheck()
+        ).observe(
             document.body,
             {
                 childList: true,
                 subtree: true
             }
         );
+
+        scheduleHarmonyCheck();
     }
 
     // =========================================================================
-    // BEATPORT — EMBEDDED DATA EXTRACTION
+    // Beatport release intake
     // =========================================================================
 
-    function findReleaseObjects(root) {
-        const results =
-            [];
-
-        const seen =
-            new Set();
-
-        function walk(value) {
-            if (
-                !value ||
-                typeof value !==
-                    'object'
-            ) {
-                return;
-            }
-
-            if (
-                seen.has(
-                    value
-                )
-            ) {
-                return;
-            }
-
-            seen.add(
-                value
-            );
-
-            if (
-                !Array.isArray(
-                    value
-                ) &&
-                value.release_id !=
-                    null &&
-                value.upc !=
-                    null
-            ) {
-                results.push(
-                    value
-                );
-            }
-
-            if (
-                Array.isArray(
-                    value
-                )
-            ) {
-                for (
-                    const item
-                    of value
-                ) {
-                    walk(
-                        item
-                    );
-                }
-            } else {
-                for (
-                    const child
-                    of Object.values(
-                        value
-                    )
-                ) {
-                    walk(
-                        child
-                    );
-                }
-            }
-        }
-
-        walk(
-            root
+    const hasOwn = (object, key) =>
+        Object.prototype.hasOwnProperty.call(
+            object,
+            key
         );
 
-        return results;
-    }
-
-    function extractBeatportReleases() {
-        const unique =
-            new Map();
-
-        for (
-            const script
-            of document.querySelectorAll(
-                'script'
-            )
-        ) {
-            const text =
-                script.textContent
-                    ?.trim();
-
-            if (!text) {
-                continue;
-            }
-
-            if (
-                !text.startsWith(
-                    '{'
-                ) &&
-                !text.startsWith(
-                    '['
-                )
-            ) {
-                continue;
-            }
-
-            try {
-                const parsed =
-                    JSON.parse(
-                        text
-                    );
-
-                const found =
-                    findReleaseObjects(
-                        parsed
-                    );
-
-                for (
-                    const release
-                    of found
-                ) {
-                    const key =
-                        `${release.release_id}:${release.upc}`;
-
-                    if (
-                        !unique.has(
-                            key
-                        )
-                    ) {
-                        unique.set(
-                            key,
-                            release
-                        );
-                    }
-                }
-
-            } catch {
-                /*
-                 * Ordinary JavaScript or another non-JSON script.
-                 */
-            }
-        }
-
-        return Array.from(
-            unique.values()
-        );
-    }
-
-    function findMatchingRelease(
-        releases,
-        barcode
+    function beatportReleaseUrl(
+        releaseId,
+        releaseName,
+        releaseSlug = ''
     ) {
-        const target =
-            normalizeBarcode(
-                barcode
+        const slug =
+            clean(releaseSlug) ||
+            slugify(
+                releaseName ||
+                'release'
             );
 
-        return releases.filter(
-            release =>
-                normalizeBarcode(
-                    release.upc
-                ) ===
-                target
-        );
-    }
-
-    function makeReleaseUrl(release) {
         return (
-            'https://www.beatport.com/release/' +
-            `${slugify(
-                release.release_name ||
-                'release'
-            )}/${release.release_id}`
+            `https://www.beatport.com/release/` +
+            `${slug}/${releaseId}`
         );
     }
 
-    function simplifyRelease(release) {
+    function beatportReleaseShape(value) {
+        if (
+            !value ||
+            typeof value !== 'object' ||
+            Array.isArray(value)
+        ) {
+            return null;
+        }
+
+        const legacyId =
+            Number(value.release_id);
+
+        if (
+            Number.isInteger(legacyId) &&
+            legacyId > 0 &&
+            clean(value.release_name) &&
+            hasOwn(value, 'catalog_number') &&
+            hasOwn(value, 'track_count') &&
+            value.label &&
+            typeof value.label === 'object' &&
+            Array.isArray(value.artists)
+        ) {
+            return 'legacy';
+        }
+
+        const v4Id =
+            Number(value.id);
+
+        if (
+            Number.isInteger(v4Id) &&
+            v4Id > 0 &&
+            clean(value.name) &&
+            hasOwn(value, 'catalog_number') &&
+            hasOwn(value, 'track_count') &&
+            value.label &&
+            typeof value.label === 'object' &&
+            Array.isArray(value.artists)
+        ) {
+            return 'v4';
+        }
+
+        return null;
+    }
+
+    function normalizeLegacyRelease(release) {
         return {
             releaseId:
-                release.release_id ??
-                null,
+                release.release_id,
 
             releaseName:
-                release.release_name ??
-                null,
+                release.release_name,
 
             upc:
-                release.upc ??
-                null,
+                release.upc,
 
             catalogNumber:
-                release.catalog_number ??
-                null,
+                release.catalog_number,
 
             label:
                 release.label
                     ? {
                         id:
-                            release.label
-                                .label_id ??
+                            release.label.label_id ??
                             null,
-
                         name:
-                            release.label
-                                .label_name ??
+                            release.label.label_name ??
                             null
                     }
                     : null,
 
             artists:
-                Array.isArray(
-                    release.artists
-                )
-                    ? release.artists.map(
+                (release.artists || [])
+                    .map(
                         artist => ({
                             id:
                                 artist.artist_id ??
                                 null,
-
                             name:
                                 artist.artist_name ??
                                 null,
-
                             type:
                                 artist.artist_type_name ??
                                 null
                         })
-                    )
-                    : [],
+                    ),
 
             aggregator:
                 release.aggregator
                     ? {
                         id:
-                            release.aggregator
-                                .aggregator_id ??
+                            release.aggregator.aggregator_id ??
                             null,
-
                         name:
-                            release.aggregator
-                                .aggregator_name ??
+                            release.aggregator.aggregator_name ??
                             null
                     }
                     : null,
 
             genres:
-                Array.isArray(
-                    release.genre
-                )
-                    ? release.genre.map(
+                (release.genre || [])
+                    .map(
                         genre => ({
                             id:
                                 genre.genre_id ??
                                 null,
-
                             name:
                                 genre.genre_name ??
                                 null
                         })
-                    )
-                    : [],
+                    ),
 
             tracks:
-                Array.isArray(
-                    release.tracks
-                )
-                    ? release.tracks.map(
-                        track => ({
+                (release.tracks || [])
+                    .map(
+                        (track, index) => ({
                             id:
-                                track.track_id ??
-                                null,
-
-                            name:
+                                Number(
+                                    track.track_id ??
+                                    track.id
+                                ),
+                            number:
+                                index + 1,
+                            title:
                                 track.track_name ??
+                                track.name ??
                                 null
                         })
                     )
-                    : [],
-
-            keys:
-                Array.isArray(
-                    release.key
-                )
-                    ? release.key.map(
-                        key => ({
-                            id:
-                                key.key_id ??
-                                null,
-
-                            name:
-                                key.key_name ??
-                                null
-                        })
-                    )
-                    : [],
+                    .filter(
+                        track =>
+                            Number.isFinite(
+                                track.id
+                            )
+                    ),
 
             releaseDate:
                 release.release_date ??
@@ -2043,433 +2967,1830 @@
                 null,
 
             releaseUrl:
-                makeReleaseUrl(
-                    release
+                beatportReleaseUrl(
+                    release.release_id,
+                    release.release_name
                 ),
 
-            raw:
-                release
+            tracklistComplete:
+                false
         };
     }
 
+    function normalizeV4Release(release) {
+        const trackUrls =
+              Array.isArray(release.tracks)
+        ? release.tracks.filter(
+            value =>
+            typeof value === 'string' &&
+            value.includes('/catalog/tracks/')
+        )
+        : [];
+
+        return {
+            releaseId: release.id,
+            releaseName: release.name,
+            upc: release.upc,
+            catalogNumber: release.catalog_number,
+
+            label: release.label
+            ? {
+                id: release.label.id ?? null,
+                name: release.label.name ?? null
+            }
+            : null,
+
+            artists: (release.artists || []).map(artist => ({
+                id: artist.id ?? null,
+                name: artist.name ?? null
+            })),
+
+            /*
+         * Only full/rich v4 release objects normally contain this.
+         * Keep Beatport's raw order here. It is reversed later when
+         * assembling Level 2.
+         */
+            ...(trackUrls.length
+                ? { trackUrls }
+                : {}),
+
+            releaseDate:
+            release.new_release_date ??
+            release.publish_date ??
+            null,
+
+            publishDate:
+            release.publish_date ??
+            null,
+
+            preorderDate:
+            release.pre_order_date ??
+            null,
+
+            trackCount:
+            release.track_count ??
+            null,
+
+            image:
+            release.image?.uri ??
+            null,
+
+            price:
+            release.price ??
+            null,
+
+            releaseUrl:
+            beatportReleaseUrl(
+                release.id,
+                release.name,
+                release.slug
+            ),
+
+            tracklistComplete:
+            false
+        };
+    }
+    function normalizeBeatportRelease(release) {
+        const shape =
+            beatportReleaseShape(release);
+
+        if (
+            shape === 'legacy'
+        ) {
+            return normalizeLegacyRelease(
+                release
+            );
+        }
+
+        if (
+            shape === 'v4'
+        ) {
+            return normalizeV4Release(
+                release
+            );
+        }
+
+        return null;
+    }
+
     // =========================================================================
-    // BEATPORT — FAILURE / DIAGNOSTIC PANEL
+    // Universal Beatport payload intake
+    //
+    // Every Beatport JSON payload can contribute one or more pieces:
+    //
+    //   release entity
+    //       -> Level 1 metadata
+    //       -> possibly reversed release.trackUrls
+    //
+    //   rich track query
+    //       -> titles / artists / ISRCs / track URLs
+    //
+    // Pieces are assembled by Beatport release ID. Once both halves exist,
+    // the release is upgraded to Level 2.
     // =========================================================================
 
-    function createDebugPanel(
-        request,
-        result
-    ) {
-        document
-            .getElementById(
-                DEBUG_PANEL_ID
+    function normalizeBeatportTracks(rawTracks) {
+        return (rawTracks || [])
+            .map(track => ({
+            id:
+            Number(
+                track?.id ??
+                track?.track_id
+            ),
+
+            url:
+            clean(track?.url) ||
+            null,
+
+            title:
+            track?.name ??
+            track?.track_name ??
+            null,
+
+            artists:
+            trackArtists(track),
+
+            isrc:
+            clean(track?.isrc) ||
+            null,
+
+            mixName:
+            track?.mix_name ??
+            null,
+
+            lengthMs:
+            Number.isFinite(
+                Number(track?.length_ms)
             )
-            ?.remove();
+            ? Number(track.length_ms)
+            : null
+        }))
+            .filter(
+            track =>
+            Number.isFinite(track.id)
+        );
+    }
 
-        const panel =
-            document.createElement(
-                'div'
+    function mergeNormalizedTracks(
+    existing = [],
+     incoming = []
+    ) {
+        const tracks = new Map();
+
+        for (
+            const track
+            of [...existing, ...incoming]
+        ) {
+            if (!Number.isFinite(Number(track?.id))) {
+                continue;
+            }
+
+            tracks.set(
+                Number(track.id),
+                track
             );
+        }
 
-        panel.id =
-            DEBUG_PANEL_ID;
+        return [...tracks.values()];
+    }
 
-        Object.assign(
-            panel.style,
-            {
-                position:
-                    'fixed',
+    function mergeObservedRelease(
+    existing,
+     incoming
+    ) {
+        if (!existing) {
+            return incoming;
+        }
 
-                top:
-                    '20px',
+        const merged =
+              mergeRelease(
+                  existing,
+                  incoming,
+                  LEVEL.RELEASE,
+                  LEVEL.RELEASE
+              );
 
-                right:
-                    '20px',
+        /*
+     * Never let a sparse release observation erase a richer
+     * full-release track URL list.
+     */
+        if (
+            (existing.trackUrls?.length || 0) >
+            (incoming.trackUrls?.length || 0)
+        ) {
+            merged.trackUrls =
+                existing.trackUrls;
+        }
 
-                width:
-                    '420px',
+        return merged;
+    }
 
-                maxHeight:
-                    '80vh',
+    /*
+ * Embedded React Query representation:
+ *
+ * queryKey:
+ *   ["tracks", { release_id: 123, ... }]
+ *
+ * state.data.results:
+ *   [rich track objects]
+ */
+    function beatportTracklistQuery(value) {
+        if (
+            !value ||
+            typeof value !== 'object' ||
+            Array.isArray(value) ||
+            !Array.isArray(value.queryKey)
+        ) {
+            return null;
+        }
 
-                overflow:
-                    'auto',
+        if (
+            value.queryKey[0] !== 'tracks'
+        ) {
+            return null;
+        }
 
-                zIndex:
-                    '2147483647',
+        const params =
+              value.queryKey[1];
 
-                background:
-                    '#181818',
+        const releaseId =
+              Number(
+                  params?.release_id
+              );
 
-                color:
-                    '#fff',
+        const results =
+              value.state?.data?.results;
 
-                border:
-                    '2px solid #ff9800',
+        if (
+            !Number.isInteger(releaseId) ||
+            releaseId <= 0 ||
+            !Array.isArray(results) ||
+            !results.length
+        ) {
+            return null;
+        }
 
-                borderRadius:
-                    '8px',
+        const tracks =
+              normalizeBeatportTracks(
+                  results
+              );
 
-                padding:
-                    '14px',
+        if (!tracks.length) {
+            return null;
+        }
 
-                boxShadow:
-                    '0 4px 20px rgba(0,0,0,.65)',
+        return {
+            releaseId,
+            tracks
+        };
+    }
 
-                fontFamily:
-                    'Arial, sans-serif',
+    /*
+ * Direct API response representation.
+ *
+ * The network interceptor sees the raw tracks endpoint response,
+ * which does NOT have a React Query queryKey wrapper. In that case
+ * the release ID comes from the request URL.
+ */
+    function beatportTracklistResponse(
+    payload,
+     sourceUrl = ''
+    ) {
+        if (
+            !payload ||
+            typeof payload !== 'object' ||
+            Array.isArray(payload) ||
+            !Array.isArray(payload.results) ||
+            !payload.results.length
+        ) {
+            return null;
+        }
 
-                fontSize:
-                    '13px',
+        let url;
 
-                lineHeight:
-                    '1.4'
+        try {
+            url =
+                new URL(
+                sourceUrl,
+                location.href
+            );
+        } catch {
+            return null;
+        }
+
+        if (
+            !url.pathname.includes(
+                '/catalog/tracks'
+            )
+        ) {
+            return null;
+        }
+
+        const releaseId =
+              Number(
+                  url.searchParams.get(
+                      'release_id'
+                  )
+              );
+
+        if (
+            !Number.isInteger(releaseId) ||
+            releaseId <= 0
+        ) {
+            return null;
+        }
+
+        const tracks =
+              normalizeBeatportTracks(
+                  payload.results
+              );
+
+        if (!tracks.length) {
+            return null;
+        }
+
+        return {
+            releaseId,
+            tracks
+        };
+    }
+
+    function inspectBeatportPayload(
+    payload,
+     sourceUrl = ''
+    ) {
+        const releases =
+              new Map();
+
+        const tracklists =
+              new Map();
+
+        const rememberRelease =
+              release => {
+                  const key =
+                        String(
+                            release.releaseId
+                        );
+
+                  releases.set(
+                      key,
+                      mergeObservedRelease(
+                          releases.get(key),
+                          release
+                      )
+                  );
+              };
+
+        const rememberTracklist =
+              tracklist => {
+                  if (!tracklist) {
+                      return;
+                  }
+
+                  const key =
+                        String(
+                            tracklist.releaseId
+                        );
+
+                  const existing =
+                        tracklists.get(key);
+
+                  tracklists.set(
+                      key,
+                      {
+                          releaseId:
+                          tracklist.releaseId,
+
+                          tracks:
+                          mergeNormalizedTracks(
+                              existing?.tracks,
+                              tracklist.tracks
+                          )
+                      }
+                  );
+              };
+
+        walkJson(
+            payload,
+            value => {
+                if (
+                    !value ||
+                    typeof value !== 'object' ||
+                    Array.isArray(value)
+                ) {
+                    return;
+                }
+
+                /*
+             * Existing Level-1 release recognition.
+             */
+                const release =
+                      normalizeBeatportRelease(
+                          value
+                      );
+
+                if (release?.releaseId) {
+                    rememberRelease(
+                        release
+                    );
+                }
+
+                /*
+             * Embedded rich track query recognition.
+             */
+                const tracklist =
+                      beatportTracklistQuery(
+                          value
+                      );
+
+                if (tracklist) {
+                    rememberTracklist(
+                        tracklist
+                    );
+                }
             }
         );
 
-        const heading =
-            document.createElement(
-                'div'
+        /*
+     * Network responses from /catalog/tracks do not contain the
+     * React Query wrapper, so recognize those using their URL.
+     */
+        rememberTracklist(
+            beatportTracklistResponse(
+                payload,
+                sourceUrl
+            )
+        );
+
+        return {
+            releases:
+            [...releases.values()],
+
+            tracklists:
+            [...tracklists.values()]
+        };
+    }
+
+    function assemblyForRelease(
+    releaseId
+    ) {
+        const key =
+              String(releaseId);
+
+        let assembly =
+            beatportAssembly.get(key);
+
+        if (!assembly) {
+            assembly = {
+                release:
+                null,
+
+                richTracks:
+                [],
+
+                level2Complete:
+                false
+            };
+
+            beatportAssembly.set(
+                key,
+                assembly
+            );
+        }
+
+        return assembly;
+    }
+
+    function beatportTrackIdFromUrl(url) {
+        const match =
+              String(url || '')
+        .match(
+            /\/tracks\/(\d+)\/?(?:\?.*)?$/
+        );
+
+        if (!match) {
+            return null;
+        }
+
+        const id =
+              Number(match[1]);
+
+        return Number.isFinite(id)
+            ? id
+        : null;
+    }
+
+    /*
+ * This is the one place where Beatport's ordering rule lives.
+ *
+ * Beatport's release.tracks URL array is stored in reverse release
+ * order. Reverse it, then use those URLs to arrange the rich track
+ * objects.
+ */
+    function buildLevel2Release(
+    release,
+     richTracks
+    ) {
+        if (
+            !release?.releaseId ||
+            !Array.isArray(release.trackUrls) ||
+            !release.trackUrls.length ||
+            !Array.isArray(richTracks) ||
+            !richTracks.length
+        ) {
+            return null;
+        }
+
+        const expectedCount =
+              Number(
+                  release.trackCount
+              );
+
+        if (
+            Number.isFinite(expectedCount) &&
+            expectedCount > 0
+        ) {
+            if (
+                release.trackUrls.length !==
+                expectedCount
+            ) {
+                return null;
+            }
+
+            /*
+         * Rich tracks may arrive over more than one paginated
+         * response, so only reject if we have too few.
+         */
+            if (
+                richTracks.length <
+                expectedCount
+            ) {
+                return null;
+            }
+        }
+
+        const orderedUrls =
+              release.trackUrls
+        .slice()
+        .reverse();
+
+        const tracksByUrl =
+              new Map();
+
+        const tracksById =
+              new Map();
+
+        for (
+            const track
+            of richTracks
+        ) {
+            if (track.url) {
+                tracksByUrl.set(
+                    track.url,
+                    track
+                );
+            }
+
+            if (
+                Number.isFinite(
+                    Number(track.id)
+                )
+            ) {
+                tracksById.set(
+                    Number(track.id),
+                    track
+                );
+            }
+        }
+
+        const tracks = [];
+
+        for (
+            let index = 0;
+            index < orderedUrls.length;
+            index++
+        ) {
+            const url =
+                  orderedUrls[index];
+
+            /*
+         * Exact URL matching is Harmony's original strategy.
+         * ID matching is a harmless fallback in case Beatport
+         * changes API hostnames while keeping the same track IDs.
+         */
+            const orderedId =
+                  beatportTrackIdFromUrl(
+                      url
+                  );
+
+            const track =
+                  tracksByUrl.get(url) ||
+                  (
+                      orderedId != null
+                      ? tracksById.get(
+                          orderedId
+                      )
+                      : null
+                  );
+
+            if (!track) {
+                return null;
+            }
+
+            tracks.push({
+                ...track,
+                number:
+                index + 1,
+                metadataFound:
+                true
+            });
+        }
+
+        if (
+            Number.isFinite(expectedCount) &&
+            expectedCount > 0 &&
+            tracks.length !== expectedCount
+        ) {
+            return null;
+        }
+
+        return {
+            ...release,
+            tracks,
+            tracklistComplete:
+            true
+        };
+    }
+
+    async function tryAssembleLevel2(
+    releaseId
+    ) {
+        const assembly =
+              assemblyForRelease(
+                  releaseId
+              );
+
+        if (
+            assembly.level2Complete
+        ) {
+            return null;
+        }
+
+        /*
+     * The persistent cache is authoritative.
+     *
+     * If this release is already Level 2, there is nothing
+     * for the assembler to rebuild. Any Level-1 metadata
+     * observed immediately beforehand has already been merged
+     * into that Level-2 cache record by cacheReleaseBatch().
+     */
+        const cached =
+              await getCachedRelease(
+                  releaseId
+              );
+
+        if (
+            cached &&
+            recordLevel(cached) >=
+            LEVEL.TRACKS
+        ) {
+            assembly.level2Complete =
+                true;
+
+            /*
+         * Keep the in-memory assembly synchronized with the
+         * canonical cached release in case anything else in
+         * this page session refers to it.
+         */
+            assembly.release =
+                cached.release;
+
+            return cached;
+        }
+
+        /*
+     * If the track query arrived before the release object,
+     * a cached Level-1 record can supply the release half.
+     */
+        if (
+            !assembly.release &&
+            cached?.release
+        ) {
+            assembly.release =
+                cached.release;
+        }
+
+        if (
+            !assembly.release ||
+            !assembly.richTracks.length
+        ) {
+            return null;
+        }
+
+        const level2 =
+              buildLevel2Release(
+                  assembly.release,
+                  assembly.richTracks
+              );
+
+        if (!level2) {
+            return null;
+        }
+
+        const record =
+              await cacheRelease(
+                  level2,
+                  LEVEL.TRACKS
+              );
+
+        if (record) {
+            assembly.level2Complete =
+                true;
+        }
+
+        return record;
+    }
+    async function ingestBeatportDataNow(
+    data,
+     sourceUrl = '',
+     source = 'network'
+    ) {
+        /*
+     * A single payload can contain the same release more than once.
+     * Deduplicate/merge it before touching storage.
+     */
+        const releases =
+              new Map();
+
+        for (
+            const release
+            of data.releases || []
+        ) {
+            if (!release?.releaseId) {
+                continue;
+            }
+
+            const key =
+                  String(
+                      release.releaseId
+                  );
+
+            releases.set(
+                key,
+                mergeObservedRelease(
+                    releases.get(key),
+                    release
+                )
+            );
+        }
+
+        const tracklists =
+              new Map();
+
+        for (
+            const tracklist
+            of data.tracklists || []
+        ) {
+            if (!tracklist?.releaseId) {
+                continue;
+            }
+
+            const key =
+                  String(
+                      tracklist.releaseId
+                  );
+
+            const existing =
+                  tracklists.get(key);
+
+            tracklists.set(
+                key,
+                {
+                    releaseId:
+                    tracklist.releaseId,
+
+                    tracks:
+                    mergeNormalizedTracks(
+                        existing?.tracks,
+                        tracklist.tracks
+                    )
+                }
+            );
+        }
+
+        const touchedReleaseIds =
+              new Set();
+
+        /*
+     * First feed all discovered pieces into the in-memory assembler.
+     */
+        for (
+            const release
+            of releases.values()
+        ) {
+            const assembly =
+                  assemblyForRelease(
+                      release.releaseId
+                  );
+
+            assembly.release =
+                mergeObservedRelease(
+                assembly.release,
+                release
             );
 
-        heading.textContent =
-            'Harmony Beatport Recovery';
-
-        Object.assign(
-            heading.style,
-            {
-                color:
-                    '#ff9800',
-
-                fontWeight:
-                    'bold',
-
-                fontSize:
-                    '16px',
-
-                marginBottom:
-                    '10px'
-            }
-        );
-
-        panel.appendChild(
-            heading
-        );
-
-        const addRow = (
-            label,
-            value
-        ) => {
-            const row =
-                document.createElement(
-                    'div'
-                );
-
-            row.style.marginBottom =
-                '5px';
-
-            const strong =
-                document.createElement(
-                    'strong'
-                );
-
-            strong.textContent =
-                `${label}: `;
-
-            row.append(
-                strong,
-                document.createTextNode(
-                    value == null
-                        ? '—'
-                        : String(
-                            value
-                        )
+            touchedReleaseIds.add(
+                String(
+                    release.releaseId
                 )
             );
 
-            panel.appendChild(
-                row
-            );
-        };
-
-        addRow(
-            'Harmony title',
-            request.title
-        );
-
-        addRow(
-            'Harmony artist',
-            request.artist
-        );
-
-        addRow(
-            'Target UPC',
-            request.barcode
-        );
-
-        const divider =
-            document.createElement(
-                'hr'
-            );
-
-        divider.style.borderColor =
-            '#555';
-
-        panel.appendChild(
-            divider
-        );
-
-        addRow(
-            'Status',
-            result.message
-        );
-
-        document.body.appendChild(
-            panel
-        );
-    }
-
-    // =========================================================================
-    // BEATPORT — AUTOMATION
-    // =========================================================================
-
-    async function processBeatportPage() {
-        const requestId =
-            new URL(
-                location.href
-            )
-                .searchParams
-                .get(
-                    'hbr'
+            if (
+                DEBUG_FOUND_RELEASES
+            ) {
+                console.info(
+                    '[Harmony Beatport Recovery] Found Beatport release',
+                    {
+                        source,
+                        url:
+                        sourceUrl,
+                        ...releaseDebugInfo(
+                            release
+                        )
+                    }
                 );
-
-        /*
-         * No HBR marker = ordinary Beatport browsing.
-         */
-        if (!requestId) {
-            return;
+            }
         }
-
-        const request =
-            await GM_getValue(
-                REQUEST_KEY,
-                null
-            );
-
-        if (
-            !request ||
-            request.requestId !==
-                requestId
-        ) {
-            console.log(
-                '[Harmony Beatport Recovery] ' +
-                'No matching active Harmony request. ' +
-                'Leaving Beatport alone.'
-            );
-
-            return;
-        }
-
-        console.log(
-            '[Harmony Beatport Recovery] Active request:',
-            request
-        );
-
-        let releases =
-            [];
 
         for (
-            let attempt = 1;
-            attempt <= 20;
-            attempt++
+            const tracklist
+            of tracklists.values()
         ) {
-            releases =
-                extractBeatportReleases();
+            const assembly =
+                  assemblyForRelease(
+                      tracklist.releaseId
+                  );
 
-            if (
-                releases.length
-            ) {
-                break;
-            }
+            assembly.richTracks =
+                mergeNormalizedTracks(
+                assembly.richTracks,
+                tracklist.tracks
+            );
 
-            await sleep(
-                500
+            touchedReleaseIds.add(
+                String(
+                    tracklist.releaseId
+                )
             );
         }
 
-        console.log(
-            '[Harmony Beatport Recovery] ' +
-            `Found ${releases.length} release objects.`
-        );
-
-        const matches =
-            findMatchingRelease(
-                releases,
-                request.barcode
+        /*
+     * Every recognized release still enters the normal Level-1
+     * cache exactly as before.
+     */
+        if (releases.size) {
+            await cacheReleaseBatch(
+                [...releases.values()],
+                LEVEL.RELEASE
             );
+        }
 
-        console.log(
-            '[Harmony Beatport Recovery] UPC matches:',
-            matches
-        );
+        /*
+     * Any touched release may now have both halves required
+     * for Level 2.
+     */
+        for (
+            const releaseId
+            of touchedReleaseIds
+        ) {
+            await tryAssembleLevel2(
+                releaseId
+            );
+        }
+    }
 
-        // ---------------------------------------------------------------------
-        // EXACTLY ONE MATCH = SUCCESS
-        // ---------------------------------------------------------------------
+    // =========================================================================
+    // Beatport network interception
+    // =========================================================================
+
+    function installBeatportNetworkInterceptor() {
+        if (!isBeatport()) {
+            return;
+        }
+
+        const page =
+              typeof unsafeWindow !== 'undefined'
+        ? unsafeWindow
+        : window;
 
         if (
-            matches.length ===
-            1
+            page.__hbrNetworkInterceptorInstalled
         ) {
-            const release =
-                simplifyRelease(
-                    matches[0]
+            return;
+        }
+
+        page.__hbrNetworkInterceptorInstalled = true;
+
+        function publish(
+        url,
+         payload
+        ) {
+            try {
+                page.postMessage(
+                    {
+                        channel:
+                        NETWORK_CHANNEL,
+                        url:
+                        String(url || ''),
+                        payload
+                    },
+                    page.location.origin
+                );
+            } catch {
+                // Never interfere with Beatport.
+            }
+        }
+
+        if (
+            typeof page.fetch === 'function'
+        ) {
+            const originalFetch =
+                  page.fetch;
+
+            page.fetch =
+                function (...args) {
+                const promise =
+                      originalFetch.apply(
+                          this,
+                          args
+                      );
+
+                promise
+                    .then(
+                    response => {
+                        try {
+                            if (
+                                !response?.ok
+                            ) {
+                                return;
+                            }
+
+                            const type =
+                                  response.headers
+                            ?.get('content-type') ||
+                                  '';
+
+                            if (
+                                !type
+                                .toLowerCase()
+                                .includes('json')
+                            ) {
+                                return;
+                            }
+
+                            response
+                                .clone()
+                                .json()
+                                .then(
+                                payload =>
+                                publish(
+                                    response.url,
+                                    payload
+                                )
+                            )
+                                .catch(
+                                () => {}
+                            );
+                        } catch {
+                            // Never interfere with Beatport.
+                        }
+                    }
+                )
+                    .catch(
+                    () => {}
                 );
 
-            const result = {
-                requestId:
-                    request.requestId,
-
-                timestamp:
-                    Date.now(),
-
-                status:
-                    'success',
-
-                request,
-
-                release
+                return promise;
             };
-
-            await GM_setValue(
-                RESULT_KEY,
-                result
-            );
-
-            await GM_deleteValue(
-                REQUEST_KEY
-            );
-
-            console.log(
-                '[Harmony Beatport Recovery] Exact UPC match:',
-                release
-            );
-
-            console.log(
-                '[Harmony Beatport Recovery] Returning result to Harmony ' +
-                'and closing Beatport tab.'
-            );
-
-            window.close();
-
-            return;
         }
 
-        // ---------------------------------------------------------------------
-        // MULTIPLE UPC MATCHES
-        // ---------------------------------------------------------------------
+        const XHR =
+              page.XMLHttpRequest;
 
-        if (
-            matches.length >
-            1
-        ) {
-            const result = {
-                requestId:
-                    request.requestId,
+        if (XHR?.prototype) {
+            const originalOpen =
+                  XHR.prototype.open;
 
-                timestamp:
-                    Date.now(),
+            const originalSend =
+                  XHR.prototype.send;
 
-                status:
-                    'ambiguous',
+            XHR.prototype.open =
+                function (
+            method,
+             url,
+             ...rest
+            ) {
+                try {
+                    this.__hbrUrl =
+                        new page.URL(
+                        url,
+                        page.location.href
+                    ).href;
+                } catch {
+                    this.__hbrUrl =
+                        String(url || '');
+                }
 
-                request,
-
-                matches:
-                    matches.map(
-                        simplifyRelease
-                    ),
-
-                message:
-                    `Found ${matches.length} Beatport releases with UPC ` +
-                    request.barcode +
-                    '. The tab was left open for review.'
+                return originalOpen.call(
+                    this,
+                    method,
+                    url,
+                    ...rest
+                );
             };
 
-            await GM_setValue(
-                RESULT_KEY,
-                result
-            );
+            XHR.prototype.send =
+                function (...args) {
+                this.addEventListener(
+                    'load',
+                    function () {
+                        try {
+                            if (
+                                this.status < 200 ||
+                                this.status >= 300
+                            ) {
+                                return;
+                            }
 
-            createDebugPanel(
-                request,
-                result
-            );
+                            const type =
+                                  this.getResponseHeader(
+                                      'content-type'
+                                  ) || '';
 
-            return;
+                            if (
+                                !type
+                                .toLowerCase()
+                                .includes('json')
+                            ) {
+                                return;
+                            }
+
+                            let payload;
+
+                            if (
+                                this.responseType === 'json'
+                            ) {
+                                payload = this.response;
+                            } else if (
+                                !this.responseType ||
+                                this.responseType === 'text'
+                            ) {
+                                payload =
+                                    JSON.parse(
+                                    this.responseText
+                                );
+                            } else {
+                                return;
+                            }
+
+                            publish(
+                                this.__hbrUrl,
+                                payload
+                            );
+                        } catch {
+                            // Never interfere with Beatport.
+                        }
+                    },
+                    {
+                        once: true
+                    }
+                );
+
+                return originalSend.apply(
+                    this,
+                    args
+                );
+            };
         }
 
-        // ---------------------------------------------------------------------
-        // NO UPC MATCH
-        // ---------------------------------------------------------------------
-
-        const result = {
-            requestId:
-                request.requestId,
-
-            timestamp:
-                Date.now(),
-
-            status:
-                'not-found',
-
-            request,
-
-            message:
-                'No Beatport release with the exact Harmony UPC ' +
-                `${request.barcode} was found. ` +
-                'The tab was left open for review.'
-        };
-
-        await GM_setValue(
-            RESULT_KEY,
-            result
-        );
-
-        createDebugPanel(
-            request,
-            result
+        console.debug(
+            '[Harmony Beatport Recovery] Beatport network interceptor installed.'
         );
     }
 
     // =========================================================================
-    // ENTRY POINT
+    // Beatport passive release discovery
     // =========================================================================
+
+    function ingestObservedBeatportPayload(
+    payload,
+     sourceUrl = ''
+    ) {
+        const data =
+              inspectBeatportPayload(
+                  payload,
+                  sourceUrl
+              );
+
+        if (
+            !data.releases.length &&
+            !data.tracklists.length
+        ) {
+            return;
+        }
+
+        passiveCacheQueue =
+            passiveCacheQueue
+            .then(
+            () =>
+            ingestBeatportDataNow(
+                data,
+                sourceUrl,
+                'network'
+            )
+        )
+            .catch(
+            error => {
+                console.warn(
+                    '[Harmony Beatport Recovery] Could not ingest Beatport data.',
+                    error
+                );
+            }
+        );
+    }
+
+    function setupBeatportNetworkReceiver() {
+        if (!isBeatport()) {
+            return;
+        }
+
+        window.addEventListener(
+            'message',
+            event => {
+                if (
+                    event.origin !==
+                    location.origin
+                ) {
+                    return;
+                }
+
+                const message =
+                      event.data;
+
+                if (
+                    message?.channel !==
+                    NETWORK_CHANNEL
+                ) {
+                    return;
+                }
+
+                ingestObservedBeatportPayload(
+                    message.payload,
+                    message.url
+                );
+            }
+        );
+    }
+
+    async function ingestEmbeddedBeatportData() {
+        const data = {
+            releases: [],
+            tracklists: []
+        };
+
+        for (
+            const root
+            of jsonRoots()
+        ) {
+            const found =
+                  inspectBeatportPayload(
+                      root,
+                      location.href
+                  );
+
+            data.releases.push(
+                ...found.releases
+            );
+
+            data.tracklists.push(
+                ...found.tracklists
+            );
+        }
+
+        if (
+            !data.releases.length &&
+            !data.tracklists.length
+        ) {
+            return [];
+        }
+
+        await ingestBeatportDataNow(
+            data,
+            location.href,
+            'embedded JSON'
+        );
+
+        return data.releases;
+    }
+
+    // =========================================================================
+    // Shared track normalization helper
+    // =========================================================================
+
+    function trackArtists(track) {
+        return (
+            track?.artists ||
+            []
+        )
+            .map(
+            artist => ({
+                id:
+                artist.id ??
+                artist.artist_id ??
+                null,
+
+                name:
+                artist.name ??
+                artist.artist_name ??
+                null
+            })
+        )
+            .filter(
+            artist =>
+            artist.name
+        );
+    }
+
+    // =========================================================================
+    // Harmony helper tab: cache monitoring only
+    // =========================================================================
+
+    function helperTargetLabel(level) {
+        return Number(level) >= LEVEL.TRACKS
+            ? 'Release + track data'
+        : 'Release metadata';
+    }
+
+    function currentBeatportReleaseId() {
+        const match =
+              location.pathname.match(
+                  /^\/release\/[^/]+\/(\d+)\/?$/
+              );
+
+        return match
+            ? String(match[1])
+        : '';
+    }
+
+    function stripHelperUrlParams() {
+        try {
+            const url =
+                  new URL(
+                      location.href
+                  );
+
+            let changed = false;
+
+            for (
+                const name
+                of [
+                    'hbr',
+                    'hbr_upc',
+                    'hbr_level'
+                ]
+            ) {
+                if (
+                    url.searchParams.has(name)
+                ) {
+                    url.searchParams.delete(name);
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                history.replaceState(
+                    history.state,
+                    '',
+                    url.toString()
+                );
+            }
+        } catch {
+            // Cosmetic only.
+        }
+    }
+
+    function loadBeatportHelperSession() {
+        const url =
+              new URL(
+                  location.href
+              );
+
+        const requestIdFromUrl =
+              clean(
+                  url.searchParams.get('hbr')
+              );
+
+        const upcFromUrl =
+              barcode(
+                  url.searchParams.get(
+                      'hbr_upc'
+                  )
+              );
+
+        const levelFromUrl =
+              Number(
+                  url.searchParams.get(
+                      'hbr_level'
+                  )
+              );
+
+        /*
+     * The first Harmony-created URL seeds a session local to this
+     * Beatport tab. sessionStorage then follows the user through
+     * subsequent Beatport navigation even though ?hbr disappears.
+     */
+        if (
+            requestIdFromUrl &&
+            upcFromUrl &&
+            [LEVEL.RELEASE, LEVEL.TRACKS]
+            .includes(levelFromUrl)
+        ) {
+            const session = {
+                requestId:
+                requestIdFromUrl,
+
+                upc:
+                upcFromUrl,
+
+                targetLevel:
+                levelFromUrl,
+
+                startedAt:
+                Date.now()
+            };
+
+            sessionStorage.setItem(
+                HELPER_SESSION_KEY,
+                JSON.stringify(session)
+            );
+
+            /*
+         * The query parameters are only bootstrap information.
+         * Removing them means manual browsing produces ordinary
+         * Beatport URLs while the helper survives in sessionStorage.
+         */
+            stripHelperUrlParams();
+
+            return session;
+        }
+
+        try {
+            const stored =
+                  JSON.parse(
+                      sessionStorage.getItem(
+                          HELPER_SESSION_KEY
+                      ) ||
+                      'null'
+                  );
+
+            const upc =
+                  barcode(
+                      stored?.upc
+                  );
+
+            const targetLevel =
+                  Number(
+                      stored?.targetLevel
+                  );
+
+            if (
+                stored?.requestId &&
+                upc &&
+                [LEVEL.RELEASE, LEVEL.TRACKS]
+                .includes(targetLevel)
+            ) {
+                return {
+                    ...stored,
+                    upc,
+                    targetLevel
+                };
+            }
+        } catch {
+            sessionStorage.removeItem(
+                HELPER_SESSION_KEY
+            );
+        }
+
+        return null;
+    }
+
+    function clearBeatportHelperSession() {
+        sessionStorage.removeItem(
+            HELPER_SESSION_KEY
+        );
+
+        helperSession = null;
+    }
+
+    function clearBeatportHelperReleaseWatch() {
+        removeGMListener(
+            helperReleaseListener
+        );
+
+        helperReleaseListener = null;
+        helperReleaseId = '';
+    }
+
+    function stopBeatportHelperWatch() {
+        removeGMListener(
+            helperUPCListener
+        );
+
+        helperUPCListener = null;
+
+        clearBeatportHelperReleaseWatch();
+    }
+
+    function helperPanel(
+    session,
+     message,
+     { manualHint = false } = {}
+    ) {
+        $('#' + IDS.helper)?.remove();
+
+        const panel =
+              el('div', {
+                  id: IDS.helper,
+                  style: {
+                      position: 'fixed',
+                      top: '20px',
+                      right: '20px',
+                      width: '360px',
+                      maxWidth: 'calc(100vw - 40px)',
+                      zIndex: '2147483647',
+                      background: '#181818',
+                      color: '#fff',
+                      border: '2px solid #ff9800',
+                      borderRadius: '8px',
+                      padding: '14px',
+                      boxShadow:
+                      '0 4px 20px rgba(0,0,0,.65)',
+                      fontFamily:
+                      'Arial, sans-serif',
+                      fontSize: '13px',
+                      lineHeight: '1.4'
+                  }
+              });
+
+        panel.append(
+            el('div', {
+                text:
+                'Harmony Beatport Recovery',
+                style: {
+                    color: '#ff9800',
+                    fontWeight: 'bold',
+                    fontSize: '16px',
+                    marginBottom: '10px'
+                }
+            }),
+
+            el(
+                'div',
+                {},
+                el('strong', {
+                    text: 'Target UPC: '
+                }),
+                session.upc
+            ),
+
+            el(
+                'div',
+                {},
+                el('strong', {
+                    text: 'Wanted: '
+                }),
+                helperTargetLabel(
+                    session.targetLevel
+                )
+            ),
+
+            el('hr'),
+
+            el('div', {
+                text: message
+            })
+        );
+
+        if (manualHint) {
+            panel.append(
+                el('div', {
+                    text:
+                    'Search or browse Beatport manually. This tab will continue watching the cache and will resume automatically as soon as the requested UPC is seen.',
+                    style: {
+                        marginTop: '10px',
+                        color: '#ddd'
+                    }
+                })
+            );
+        }
+
+        const cancel =
+              el('button', {
+                  type: 'button',
+                  text: 'Cancel recovery',
+                  style: {
+                      marginTop: '12px',
+                      padding: '5px 9px',
+                      cursor: 'pointer'
+                  }
+              });
+
+        cancel.addEventListener(
+            'click',
+            () => {
+                stopBeatportHelperWatch();
+                clearBeatportHelperSession();
+                stripHelperUrlParams();
+                panel.remove();
+            }
+        );
+
+        panel.append(cancel);
+
+        document.body.append(panel);
+    }
+
+    function finishBeatportHelper(
+    session,
+     record
+    ) {
+        stopBeatportHelperWatch();
+        clearBeatportHelperSession();
+        stripHelperUrlParams();
+
+        /*
+     * Normally GM_openInTab-created tabs can close themselves.
+     * If the browser refuses, the completion notice remains visible.
+     */
+        helperPanel(
+            session,
+            `Recovered Beatport ${
+            recordLevel(record) >= LEVEL.TRACKS
+            ? 'release and track'
+            : 'release'
+            } data. This tab can be closed.`
+        );
+
+        window.close();
+    }
+
+    function watchBeatportHelperRelease(
+    releaseId
+    ) {
+        const id =
+              String(releaseId);
+
+        if (helperReleaseId === id) {
+            return;
+        }
+
+        clearBeatportHelperReleaseWatch();
+
+        helperReleaseId = id;
+
+        helperReleaseListener =
+            GM_addValueChangeListener(
+            cacheKey(id),
+            () =>
+            refreshBeatportHelper()
+            .catch(
+                error =>
+                console.warn(
+                    '[Harmony Beatport Recovery] Helper cache watch failed.',
+                    error
+                )
+            )
+        );
+    }
+
+    async function refreshBeatportHelper() {
+        const session =
+              helperSession;
+
+        if (!session) {
+            return;
+        }
+
+        const state =
+              await readCachedUPCState(
+                  session.upc
+              );
+
+        /*
+     * The helper may have been cancelled while awaiting storage.
+     */
+        if (
+            helperSession !== session
+        ) {
+            return;
+        }
+
+        if (state.status === 'ambiguous') {
+            clearBeatportHelperReleaseWatch();
+
+            helperPanel(
+                session,
+                `More than one cached Beatport release uses UPC ${session.upc}.`,
+                {
+                    manualHint: true
+                }
+            );
+
+            return;
+        }
+
+        /*
+     * This is no longer an error or timeout.
+     *
+     * The user can search, open an artist/label page, change the
+     * search terms, etc. The universal Beatport scraper keeps doing
+     * its normal work and this listener waits for the UPC pointer.
+     */
+        if (!state.releaseId) {
+            clearBeatportHelperReleaseWatch();
+
+            helperPanel(
+                session,
+                `No Beatport release with UPC ${session.upc} has been seen yet.`,
+                {
+                    manualHint: true
+                }
+            );
+
+            return;
+        }
+
+        watchBeatportHelperRelease(
+            state.releaseId
+        );
+
+        const record =
+              state.status === 'hit'
+        ? state.record
+        : await getCachedRelease(
+            state.releaseId
+        );
+
+        if (
+            !record?.release ||
+            barcode(record.release.upc) !==
+            session.upc
+        ) {
+            helperPanel(
+                session,
+                'The matching UPC was seen. Waiting for its release record to finish caching.'
+            );
+
+            return;
+        }
+
+        /*
+     * Desired cache level reached. There is no event back to Harmony:
+     * Harmony is independently watching this same cache record.
+     */
+        if (
+            recordLevel(record) >=
+            session.targetLevel
+        ) {
+            finishBeatportHelper(
+                session,
+                record
+            );
+
+            return;
+        }
+
+        /*
+     * Level 1 identifies the exact Beatport release. If Level 2 was
+     * requested, navigate to it. The universal scraper—not this
+     * helper—will ingest the full release/track JSON and upgrade it.
+     */
+        if (
+            session.targetLevel >= LEVEL.TRACKS
+        ) {
+            const releaseId =
+                  String(
+                      record.release.releaseId
+                  );
+
+            if (
+                currentBeatportReleaseId() !==
+                releaseId
+            ) {
+                helperPanel(
+                    session,
+                    'Matching release found. Opening its release page to retrieve full track data.'
+                );
+
+                location.href =
+                    record.release.releaseUrl;
+
+                return;
+            }
+
+            helperPanel(
+                session,
+                'Matching release found. Waiting for the universal scraper to cache the full tracklist.'
+            );
+
+            return;
+        }
+
+        helperPanel(
+            session,
+            'Matching release found. Waiting for the cache to finish updating.'
+        );
+    }
+
+    async function initBeatportHelper() {
+        helperSession =
+            loadBeatportHelperSession();
+
+        if (!helperSession) {
+            return;
+        }
+
+        helperPanel(
+            helperSession,
+            `Watching Beatport for UPC ${helperSession.upc}.`,
+            {
+                manualHint: true
+            }
+        );
+
+        helperUPCListener =
+            GM_addValueChangeListener(
+            upcKey(
+                helperSession.upc
+            ),
+            () =>
+            refreshBeatportHelper()
+            .catch(
+                error =>
+                console.warn(
+                    '[Harmony Beatport Recovery] Helper UPC watch failed.',
+                    error
+                )
+            )
+        );
+
+        /*
+     * Do an initial read as well as listening for future changes.
+     * This handles a UPC that the universal scraper cached before
+     * the helper listener finished initializing.
+     */
+        await refreshBeatportHelper();
+    }
+
+    // =========================================================================
+    // Beatport entry
+    // =========================================================================
+
+    async function processBeatport() {
+        /*
+     * Universal Beatport ingestion always runs.
+     *
+     * Harmony-created helper tabs do not contain any Beatport
+     * parsing logic. They merely watch the cache produced by this
+     * same universal scraper.
+     */
+        await ingestEmbeddedBeatportData();
+
+        await initBeatportHelper();
+    }
+
+    if (isBeatport()) {
+        setupBeatportNetworkReceiver();
+        installBeatportNetworkInterceptor();
+    }
 
     function init() {
         if (isHarmony()) {
             initHarmony();
-            return;
-        }
-
-        if (isBeatport()) {
-            processBeatportPage();
+        } else if (isBeatport()) {
+            processBeatport();
         }
     }
 
     if (
-        document.readyState ===
-        'loading'
+        document.readyState === 'loading'
     ) {
         document.addEventListener(
             'DOMContentLoaded',
             init,
-            {
-                once: true
-            }
+            { once: true }
         );
     } else {
         init();
     }
-
 })();
