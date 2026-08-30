@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Harmony: Beatport Recovery
 // @namespace    https://github.com/djkhjg/musicbrainz-userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  Recovers and caches Beatport release and optional track metadata for Harmony.
 // @author       djkhjg
 // @license      MIT
 // @homepageURL  https://github.com/djkhjg/musicbrainz-userscripts/tree/main/harmony-beatport-recovery
 // @supportURL   https://github.com/djkhjg/musicbrainz-userscripts/issues
-// @downloadURL  https://raw.githubusercontent.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
-// @updateURL    https://raw.githubusercontent.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
+// @downloadURL  https://raw.github.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
+// @updateURL    https://raw.github.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
 // @match        https://harmony.pulsewidth.org.uk/release*
 // @match        https://harmony.mybrainz.dev/release*
 // @match        https://www.beatport.com/*
@@ -29,7 +29,8 @@
     // Debug logging
     const DEBUG_FOUND_RELEASES = false;
     const DEBUG_CACHED_RELEASES = false;
-    const DEBUG_CACHE_PRUNING = false;
+    const DEBUG_CACHE_PRUNING = true;
+    const DEBUG_RELEASE_ACTIONS = true;
 
     // Console commands for debug:
     // HBR.clearCache() -> clear entire cache
@@ -86,7 +87,16 @@
     const AUTO_SETTING_KEY = 'hbr-setting-auto';
 
     const LEVEL = { NONE: 0, RELEASE: 1, TRACKS: 2 };
-    const MB = { download: '74', streaming: '980' };
+    const MB = {
+        download: '74',
+        streaming: '980',
+
+        entityDownload: {
+            artist: '176',
+            label: '959',
+            recording: '254'
+        }
+    };
     const NETWORK_CHANNEL = 'hbr-beatport-network-json-v1';
 
     const IDS = {
@@ -139,25 +149,29 @@
     const barcode = value => String(value ?? '').replace(/\D/g, '').replace(/^0+/, '');
 
     const normalizeName = value => String(value ?? '')
-        .normalize('NFKD')
-        .toLowerCase()
-        .replace(/[’‘]/g, "'")
-        .replace(/[^a-z0-9]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
     const slugify = value => String(value ?? '')
-        .toLowerCase()
-        .normalize('NFKD')
-        .replace(/[^\w\s-]/g, '')
-        .trim()
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-');
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-');
 
     const isHarmony = () => [
         'harmony.pulsewidth.org.uk',
         'harmony.mybrainz.dev'
     ].includes(location.hostname);
+
+    const isHarmonyReleaseActions = () =>
+    isHarmony() &&
+          location.pathname === '/release/actions';
 
     const isBeatport = () => location.hostname === 'www.beatport.com';
 
@@ -220,6 +234,17 @@
         }
 
         return roots;
+    }
+
+    function debugReleaseActions(...args) {
+        if (!DEBUG_RELEASE_ACTIONS) {
+            return;
+        }
+
+        console.log(
+            '[Harmony Beatport Recovery] [Release Actions]',
+            ...args
+        );
     }
 
     // =========================================================================
@@ -454,7 +479,7 @@
             !Array.isArray(lru)
         )
             ? lru
-            : {};
+        : {};
     }
 
     const saveCacheLru = lru => GM_setValue(CACHE_LRU_KEY, lru);
@@ -464,16 +489,16 @@
 
         return tracks.reduce(
             (score, track) =>
-                score +
-                (Number.isFinite(Number(track?.id)) ? 1 : 0) +
-                (clean(track?.title) ? 2 : 0) +
-                (
-                    Array.isArray(track?.artists) &&
-                    track.artists.length
-                        ? 2
-                        : 0
-                ) +
-                (clean(track?.isrc) ? 3 : 0),
+            score +
+            (Number.isFinite(Number(track?.id)) ? 1 : 0) +
+            (clean(track?.title) ? 2 : 0) +
+            (
+                Array.isArray(track?.artists) &&
+                track.artists.length
+                ? 2
+                : 0
+            ) +
+            (clean(track?.isrc) ? 3 : 0),
             0
         );
     }
@@ -483,10 +508,10 @@
 
         return artists.reduce(
             (score, artist) =>
-                score +
-                (artist?.id != null ? 1 : 0) +
-                (clean(artist?.name) ? 1 : 0) +
-                (clean(artist?.type) ? 1 : 0),
+            score +
+            (artist?.id != null ? 1 : 0) +
+            (clean(artist?.name) ? 1 : 0) +
+            (clean(artist?.type) ? 1 : 0),
             0
         );
     }
@@ -503,10 +528,10 @@
         const incomingTrackScore = trackListScore(incoming?.tracks);
 
         const preserveRicherLevel1 =
-            existingLevel === LEVEL.RELEASE &&
-            incomingLevel === LEVEL.RELEASE &&
-            existingTrackScore > 0 &&
-            incomingTrackScore === 0;
+              existingLevel === LEVEL.RELEASE &&
+              incomingLevel === LEVEL.RELEASE &&
+              existingTrackScore > 0 &&
+              incomingTrackScore === 0;
 
         let merged;
 
@@ -606,8 +631,8 @@
 
         if (Array.isArray(current)) {
             const remaining = current
-                .map(String)
-                .filter(value => value !== id);
+            .map(String)
+            .filter(value => value !== id);
 
             if (!remaining.length) {
                 await GM_deleteValue(key);
@@ -832,9 +857,9 @@
             const newUPC = barcode(mergedRelease.upc);
 
             const changed =
-                !existing ||
-                existingLevel !== finalLevel ||
-                JSON.stringify(existing.release) !== JSON.stringify(mergedRelease);
+                  !existing ||
+                  existingLevel !== finalLevel ||
+                  JSON.stringify(existing.release) !== JSON.stringify(mergedRelease);
 
             let record = existing;
 
@@ -857,10 +882,10 @@
 
                 if (DEBUG_CACHED_RELEASES) {
                     const action = !existing
-                        ? 'new'
-                        : finalLevel > existingLevel
-                            ? 'upgraded'
-                            : 'updated';
+                    ? 'new'
+                    : finalLevel > existingLevel
+                    ? 'upgraded'
+                    : 'updated';
 
                     console.info(
                         '[Harmony Beatport Recovery] Cached Beatport release',
@@ -1108,7 +1133,7 @@
             }
         );
 
-    /*
+        /*
      * Harmony may take a while to complete the second lookup.
      * Replace the dead-provider error with an explanation of what
      * the recovery script is doing in the meantime.
@@ -1609,7 +1634,10 @@
         );
     }
 
-    function settingsPanel() {
+    function settingsPanel({
+        showTrackData = true,
+        onAuto = maybeAutoLookup
+    } = {}) {
         const track = el('input', {
             id: IDS.trackSetting,
             type: 'checkbox',
@@ -1635,8 +1663,11 @@
                 autoStartedFor = null;
                 updateActionButton();
 
-                if (settings.auto) {
-                    maybeAutoLookup();
+                if (
+                    settings.auto &&
+                    typeof onAuto === 'function'
+                ) {
+                    onAuto();
                 }
             }
         );
@@ -1651,43 +1682,57 @@
                     settings.auto
                 );
 
-                if (settings.auto) {
-                    maybeAutoLookup();
+                if (
+                    settings.auto &&
+                    typeof onAuto === 'function'
+                ) {
+                    onAuto();
                 }
             }
         );
 
-        return el(
-            'div',
-            {
-                id: IDS.settings,
-                style: {
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '6px 18px',
-                    marginTop: '8px',
-                    fontSize: '0.9em'
-                }
-            },
-            el(
-                'label',
-                {
-                    title:
+        const panel =
+              el(
+                  'div',
+                  {
+                      id: IDS.settings,
+                      style: {
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: '6px 18px',
+                          marginTop: '8px',
+                          fontSize: '0.9em'
+                      }
+                  }
+              );
+
+        if (showTrackData) {
+            panel.append(
+                el(
+                    'label',
+                    {
+                        title:
                         'Open the exact Beatport release page and retrieve track titles, artists and ISRCs.'
-                },
-                track,
-                ' Retrieve track data'
-            ),
+                    },
+                    track,
+                    ' Retrieve track data'
+                )
+            );
+        }
+
+        panel.append(
             el(
                 'label',
                 {
                     title:
-                        'Automatically retrieve whatever Beatport information is still missing.'
+                    'Automatically retrieve whatever Beatport information is still missing.'
                 },
                 auto,
                 ' Auto'
             )
         );
+
+        return panel;
     }
 
     function ensureSettingsPanel(parent) {
@@ -1819,11 +1864,14 @@
         return true;
     }
 
-    function recoveryButton() {
+    function recoveryButton({
+        text = 'Find on Beatport',
+        onClick = startLookup
+    } = {}) {
         const button = el('button', {
             id: IDS.button,
             type: 'button',
-            text: 'Find on Beatport',
+            text,
             style: {
                 marginTop: '8px',
                 padding: '6px 12px',
@@ -1838,7 +1886,7 @@
         button.addEventListener(
             'click',
             () =>
-            startLookup(
+            onClick(
                 button
             )
         );
@@ -2037,7 +2085,7 @@
         let item = $('#' + IDS.label);
 
         const signature =
-            `${release.label.id}|${release.label.name}|${release.catalogNumber}`;
+              `${release.label.id}|${release.label.name}|${release.catalogNumber}`;
 
         if (
             item?.dataset.signature === signature
@@ -2063,8 +2111,8 @@
                     'a',
                     {
                         href:
-                            `https://www.beatport.com/label/` +
-                            `${slugify(release.label.name)}/${release.label.id}`,
+                        `https://www.beatport.com/label/` +
+                        `${slugify(release.label.name)}/${release.label.id}`,
                         target: '_blank',
                         rel: 'noopener noreferrer'
                     },
@@ -2087,8 +2135,8 @@
                     {},
                     labelContent,
                     release.catalogNumber
-                        ? ` ${release.catalogNumber}`
-                        : ''
+                    ? ` ${release.catalogNumber}`
+                    : ''
                 )
             ),
             beatportIcon()
@@ -2101,15 +2149,15 @@
         if (!message) return;
 
         const level =
-            recordLevel(currentRecord()) ||
-            (
-                release.tracklistComplete
-                    ? LEVEL.TRACKS
-                    : LEVEL.RELEASE
-            );
+              recordLevel(currentRecord()) ||
+              (
+                  release.tracklistComplete
+                  ? LEVEL.TRACKS
+                  : LEVEL.RELEASE
+              );
 
         const signature =
-            `${release.releaseId}|${level}`;
+              `${release.releaseId}|${level}`;
 
         if (
             message.dataset.hbrRecovered === signature &&
@@ -2143,13 +2191,13 @@
                         text: `${label}: `
                     }),
                     href
-                        ? el('a', {
-                            href,
-                            target: '_blank',
-                            rel: 'noopener noreferrer',
-                            text: value
-                        })
-                        : String(value)
+                    ? el('a', {
+                        href,
+                        target: '_blank',
+                        rel: 'noopener noreferrer',
+                        text: value
+                    })
+                    : String(value)
                 )
             );
         };
@@ -2159,9 +2207,9 @@
         line(
             'Artist',
             release.artists
-                .map(artist => artist.name)
-                .filter(Boolean)
-                .join(', ')
+            .map(artist => artist.name)
+            .filter(Boolean)
+            .join(', ')
         );
 
         line('UPC', release.upc);
@@ -2216,12 +2264,12 @@
     // =========================================================================
 
     const altList = cell =>
-        $(':scope > ul.alt-values', cell) ||
-        cell.appendChild(
-            el('ul', {
-                class: 'alt-values'
-            })
-        );
+    $(':scope > ul.alt-values', cell) ||
+          cell.appendChild(
+              el('ul', {
+                  class: 'alt-values'
+              })
+          );
 
     function addTrackProviderIcon(cell, index, field, url) {
         const id =
@@ -2306,12 +2354,12 @@
     }
 
     function normalizedTrackText(value) {
-    return clean(value)
-        .normalize('NFKD')
-        .toLowerCase()
-        .replace(/[’‘]/g, "'")
-        .replace(/\s+/g, ' ')
-        .trim();
+        return clean(value)
+            .normalize('NFKD')
+            .toLowerCase()
+            .replace(/[’‘]/g, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     function harmonyTrackTitle(cell) {
@@ -2383,9 +2431,9 @@
     }
 
     const trackUrl = track =>
-        track.id
-            ? `https://www.beatport.com/track/${slugify(track.title || 'track')}/${track.id}`
-            : null;
+    track.id
+    ? `https://www.beatport.com/track/${slugify(track.title || 'track')}/${track.id}`
+    : null;
 
     function beatportArtistUrl(artist) {
         return artist?.id
@@ -2478,21 +2526,21 @@
     }
 
     const isrcNode = isrc =>
-        isrc
-            ? el('code', {
-                class: 'isrc',
-                text: isrc
-            })
-            : document.createTextNode('—');
+    isrc
+    ? el('code', {
+        class: 'isrc',
+        text: isrc
+    })
+    : document.createTextNode('—');
 
     const nativeTrackRows = table =>
-        $$('tbody > tr', table)
-            .filter(
-                row =>
-                    !row.classList.contains(
-                        'hbr-beatport-extra-track'
-                    )
-            );
+    $$('tbody > tr', table)
+    .filter(
+        row =>
+        !row.classList.contains(
+            'hbr-beatport-extra-track'
+        )
+    );
 
     function clearTrackComparison(table) {
         $$(
@@ -2604,17 +2652,17 @@
         );
 
         const matches =
-            beatportCount === harmonyCount;
+              beatportCount === harmonyCount;
 
         label.textContent =
             matches
-                ? `Beatport: ${beatportCount} tracks`
-                : `Beatport: ${beatportCount} tracks — Harmony: ${harmonyCount}`;
+            ? `Beatport: ${beatportCount} tracks`
+        : `Beatport: ${beatportCount} tracks — Harmony: ${harmonyCount}`;
 
         label.title =
             matches
-                ? 'Beatport and Harmony contain the same number of tracks.'
-                : 'Beatport and Harmony have different track counts.';
+            ? 'Beatport and Harmony contain the same number of tracks.'
+        : 'Beatport and Harmony have different track counts.';
 
         label.style.backgroundColor =
             matches ? '' : '#ff9800';
@@ -2836,9 +2884,9 @@
                         'tr',
                         {
                             class:
-                                'hbr-beatport-extra-track',
+                            'hbr-beatport-extra-track',
                             title:
-                                'This track exists in Beatport but has no corresponding Harmony row.'
+                            'This track exists in Beatport but has no corresponding Harmony row.'
                         },
                         el('td', {
                             class: 'numeric',
@@ -2848,16 +2896,16 @@
                             'td',
                             {},
                             url
-                                ? el('a', {
-                                    href: url,
-                                    target: '_blank',
-                                    rel: 'noopener noreferrer',
-                                    text: track.title || '—'
-                                })
-                                : (
-                                    track.title ||
-                                    '—'
-                                ),
+                            ? el('a', {
+                                href: url,
+                                target: '_blank',
+                                rel: 'noopener noreferrer',
+                                text: track.title || '—'
+                            })
+                            : (
+                                track.title ||
+                                '—'
+                            ),
                             beatportIcon()
                         ),
                         el(
@@ -2892,20 +2940,20 @@
             form
         )
             .map(
-                input => {
-                    const match =
-                        input.name.match(
-                            /^labels\.(\d+)\.name$/
-                        );
+            input => {
+                const match =
+                      input.name.match(
+                          /^labels\.(\d+)\.name$/
+                      );
 
-                    return match
-                        ? {
-                            index: Number(match[1]),
-                            name: input.value
-                        }
-                        : null;
+                return match
+                    ? {
+                    index: Number(match[1]),
+                    name: input.value
                 }
-            )
+                : null;
+            }
+        )
             .filter(Boolean);
     }
 
@@ -3042,9 +3090,9 @@
             of $$('input[name]', form)
         ) {
             const match =
-                input.name.match(
-                    /^urls\.(\d+)\.(url|link_type)$/
-                );
+                  input.name.match(
+                      /^urls\.(\d+)\.(url|link_type)$/
+                  );
 
             if (!match) continue;
 
@@ -3055,9 +3103,9 @@
                 {
                     ...result.get(index),
                     [
-                        match[2] === 'url'
-                            ? 'url'
-                            : 'type'
+                    match[2] === 'url'
+                    ? 'url'
+                    : 'type'
                     ]: input.value
                 }
             );
@@ -3071,19 +3119,19 @@
 
         if (
             [...entries.values()]
-                .some(
-                    entry =>
-                        clean(entry.url) === clean(url) &&
-                        String(entry.type) === String(type)
-                )
+            .some(
+                entry =>
+                clean(entry.url) === clean(url) &&
+                String(entry.type) === String(type)
+            )
         ) {
             return;
         }
 
         const index =
-            entries.size
-                ? Math.max(...entries.keys()) + 1
-                : 0;
+              entries.size
+        ? Math.max(...entries.keys()) + 1
+        : 0;
 
         hidden(
             form,
@@ -3104,19 +3152,97 @@
         if (!field) return;
 
         const line =
-            `* Beatport: ${release.releaseUrl}`;
+              `* Beatport: ${release.releaseUrl}`;
 
         if (
             !field.value.includes(line)
         ) {
             field.value +=
                 `${
-                    field.value &&
-                    !field.value.endsWith('\n')
-                        ? '\n'
-                        : ''
-                }${line}`;
+            field.value &&
+                !field.value.endsWith('\n')
+                ? '\n'
+            : ''
+        }${line}`;
         }
+    }
+
+    function ensureBeatportRedirectState(form, release) {
+        if (
+            !release?.releaseId
+        ) {
+            return;
+        }
+
+        const field =
+              $('[name="redirect_uri"]', form);
+
+        if (
+            !field ||
+            !clean(field.value)
+        ) {
+            return;
+        }
+
+        let redirect;
+
+        try {
+            redirect =
+                new URL(
+                field.value,
+                location.href
+            );
+        } catch {
+            return;
+        }
+
+        /*
+     * Only touch Harmony's Release Actions redirect.
+     *
+     * This preserves every parameter Harmony already encoded
+     * while explicitly carrying the failed Beatport provider
+     * forward by release ID.
+     */
+        if (
+            redirect.pathname !==
+            '/release/actions'
+        ) {
+            return;
+        }
+
+        const releaseId =
+              String(
+                  release.releaseId
+              );
+
+        if (
+            redirect.searchParams.get(
+                'beatport'
+            ) ===
+            releaseId
+        ) {
+            return;
+        }
+
+        redirect.searchParams.set(
+            'beatport',
+            releaseId
+        );
+
+        field.value =
+            redirect.toString();
+
+        field.dataset.hbrBeatport =
+            '1';
+
+        debugReleaseActions(
+            'Added Beatport release ID to Harmony redirect state.',
+            {
+                releaseId,
+                redirect:
+                field.value
+            }
+        );
     }
 
     function patchSeed(form, release) {
@@ -3128,7 +3254,9 @@
         }
 
         const name =
-            form.getAttribute('name');
+              form.getAttribute(
+                  'name'
+              );
 
         if (
             ![
@@ -3156,8 +3284,26 @@
             release
         );
 
+        /*
+     * Harmony normally only carries successful providers into
+     * the post-MusicBrainz Release Actions redirect.
+     *
+     * Beatport failed, so explicitly preserve its known release ID:
+     *
+     *     beatport=<release ID>
+     *
+     * Release Actions will then retry Beatport itself and render
+     * its normal Beatport failure message, which HBR can use as
+     * both activation signal and release identity.
+     */
+        ensureBeatportRedirectState(
+            form,
+            release
+        );
+
         if (
-            name === 'release-seeder'
+            name ===
+            'release-seeder'
         ) {
             ensureCatalogNumber(
                 form,
@@ -3171,10 +3317,10 @@
             'form[name="release-seeder"], form[name="release-update-seeder"]'
         ).forEach(
             form =>
-                patchSeed(
-                    form,
-                    release
-                )
+            patchSeed(
+                form,
+                release
+            )
         );
     }
 
@@ -3513,33 +3659,35 @@
                   harmonyBarcode()
               );
 
-        const enteredUpc =
-              barcode(
-                  $('#gtin-input')?.value
-              );
-
         /*
      * Harmony has completely failed to construct a release.
      *
-     * A GTIN in the search box does NOT by itself imply that this
-     * lookup has anything to do with Beatport.
-     *
-     * Only show our Beatport-specific explanation if that GTIN is
-     * already known in the Beatport cache.
+     * If this was a Beatport URL lookup, the URL already gives us
+     * the exact Beatport release ID. Use that as the authoritative
+     * pointer into HBR's cache instead of looking back at Harmony's
+     * temporary GTIN search field.
      */
         if (
             beatportFailureMessage() &&
             noProviderReturnedRelease() &&
-            enteredUpc &&
             !upc
         ) {
-            await showNoHarmonyReleaseMessage(
-                enteredUpc
-            );
+            const releaseId =
+                  beatportReleaseIdFromUrl(
+                      $('#url-input')?.value
+                  );
 
-            return;
+            if (releaseId) {
+                const handled =
+                      await showNoHarmonyReleaseMessage(
+                          releaseId
+                      );
+
+                if (handled) {
+                    return;
+                }
+            }
         }
-
         /*
      * A failed Beatport URL-only lookup has no rendered Harmony UPC yet.
      *
@@ -3636,38 +3784,26 @@
         }
     }
 
-    async function showNoHarmonyReleaseMessage(upc) {
-        const wantedUpc =
-              barcode(
-                  upc
-              );
-
-        if (!wantedUpc) {
+    async function showNoHarmonyReleaseMessage(releaseId) {
+        if (!releaseId) {
             return false;
         }
 
         /*
-     * A bare GTIN lookup is only considered a Beatport case if
-     * our cache already associates that UPC with a Beatport release.
-     *
-     * Otherwise there is no reason to assume the user's lookup
-     * has anything to do with Beatport, so leave Harmony's native
-     * error message completely untouched.
+     * The Beatport URL gives us the exact release identity.
+     * Read that canonical cache record directly.
      */
-        const state =
-              await readCachedUPCState(
-                  wantedUpc
+        const record =
+              await getCachedRelease(
+                  releaseId
               );
 
-        if (
-            state.status !== 'hit' ||
-            !state.record?.release
-        ) {
+        if (!record?.release) {
             return false;
         }
 
         const release =
-              state.record.release;
+              record.release;
 
         const message =
               beatportFailureMessage();
@@ -3679,7 +3815,9 @@
         if (
             message.dataset
             .hbrNoHarmonyRelease ===
-            String(release.releaseId)
+            String(
+                release.releaseId
+            )
         ) {
             return true;
         }
@@ -3712,7 +3850,7 @@
                 'p',
                 {
                     text:
-                    'No other Harmony provider returned a release for this GTIN, so Beatport Recovery cannot build a Harmony release to enrich.'
+                    'No other Harmony provider returned a release, so Beatport Recovery has no Harmony release to enrich.'
                 }
             ),
 
@@ -3720,7 +3858,7 @@
                 'p',
                 {
                     text:
-                    'This GTIN matches a Beatport release already found in the Beatport Recovery cache. Seed the release directly using a Beatport MusicBrainz importer instead.'
+                    'The exact Beatport release is already in the Beatport Recovery cache. Seed the release directly using a Beatport MusicBrainz importer instead.'
                 }
             ),
 
@@ -3747,6 +3885,3271 @@
         );
 
         return true;
+    }
+
+    // =========================================================================
+    // Harmony Release Actions
+    // =========================================================================
+
+    let releaseActionsStarted = false;
+    let releaseActionsReleaseListener = null;
+    let releaseActionsQueue = Promise.resolve();
+
+    let lastMbRequestAt = 0;
+
+    function normalizeIsrc(value) {
+        const normalized =
+              clean(
+                  value
+              )
+        .toUpperCase()
+        .replace(
+            /[^A-Z0-9]/g,
+            ''
+        );
+
+        return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(
+            normalized
+        )
+            ? normalized
+        : '';
+    }
+
+    function musicBrainzApiUrl(type, id = '') {
+        const url =
+              new URL(
+                  `https://musicbrainz.org/ws/2/${type}${id ? `/${id}` : ''}`
+              );
+
+        url.searchParams.set(
+            'fmt',
+            'json'
+        );
+
+        return url;
+    }
+
+    async function musicBrainzJson(url) {
+        const elapsed =
+              Date.now() -
+              lastMbRequestAt;
+
+        if (elapsed < 1100) {
+            const delay =
+                  1100 - elapsed;
+
+            debugReleaseActions(
+                `Waiting ${delay} ms before MusicBrainz request.`
+            );
+
+            await new Promise(
+                resolve =>
+                setTimeout(
+                    resolve,
+                    delay
+                )
+            );
+        }
+
+        lastMbRequestAt =
+            Date.now();
+
+        debugReleaseActions(
+            'MusicBrainz request:',
+            url.toString()
+        );
+
+        let response;
+
+        try {
+            response =
+                await fetch(
+                url,
+                {
+                    headers: {
+                        Accept:
+                        'application/json'
+                    }
+                }
+            );
+        } catch (error) {
+            debugReleaseActions(
+                'MusicBrainz fetch threw before receiving a response.',
+                {
+                    url:
+                    url.toString(),
+
+                    error
+                }
+            );
+
+            throw error;
+        }
+
+        debugReleaseActions(
+            'MusicBrainz response:',
+            {
+                url:
+                response.url,
+
+                status:
+                response.status,
+
+                ok:
+                response.ok,
+
+                type:
+                response.type
+            }
+        );
+
+        if (!response.ok) {
+            const error =
+                  new Error(
+                      `MusicBrainz API returned ${response.status} for ${url}`
+                  );
+
+            error.hbrMusicBrainz =
+                true;
+
+            error.status =
+                response.status;
+
+            error.url =
+                url.toString();
+
+            throw error;
+        }
+
+        const json =
+              await response.json();
+
+        debugReleaseActions(
+            'MusicBrainz JSON parsed.',
+            json
+        );
+
+        return json;
+    }
+
+    function releaseActionsMbid() {
+        const value =
+              new URL(
+                  location.href
+              ).searchParams.get(
+                  'release_mbid'
+              );
+
+        const match =
+              clean(value).match(
+                  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+              );
+
+        return match
+            ? match[0].toLowerCase()
+        : '';
+    }
+
+    function releaseActionsExistingIsrcs() {
+        const link =
+              $('.magic-isrc');
+
+        if (!link) {
+            return [];
+        }
+
+        try {
+            const url =
+                  new URL(
+                      link.href,
+                      location.href
+                  );
+
+            return [
+                ...url.searchParams
+            ]
+                .filter(
+                ([name]) =>
+                /^isrc\d+$/i.test(
+                    name
+                )
+            )
+                .map(
+                ([, value]) =>
+                normalizeIsrc(
+                    value
+                )
+            )
+                .filter(Boolean);
+        } catch {
+            return [];
+        }
+    }
+
+    async function fetchMbReleaseStructure(releaseMbid) {
+        const url =
+              musicBrainzApiUrl(
+                  'release',
+                  releaseMbid
+              );
+
+        url.searchParams.set(
+            'inc',
+            [
+                'artist-credits',
+                'labels',
+                'recordings',
+                'isrcs'
+            ].join('+')
+        );
+
+        return musicBrainzJson(
+            url
+        );
+    }
+
+    async function fetchMbReleaseEntities(entityType, releaseMbid, includes = 'url-rels') {
+        const url =
+              musicBrainzApiUrl(
+                  entityType
+              );
+
+        url.searchParams.set(
+            'release',
+            releaseMbid
+        );
+
+        url.searchParams.set(
+            'inc',
+            includes
+        );
+
+        url.searchParams.set(
+            'limit',
+            '100'
+        );
+
+        const result =
+              await musicBrainzJson(
+                  url
+              );
+
+        const key = {
+            artist: 'artists',
+            label: 'labels',
+            recording: 'recordings'
+        }[entityType];
+
+        return (
+            result?.[key] ||
+            []
+        );
+    }
+
+    async function fetchMbReleaseEntitiesSafe(entityType, releaseMbid, includes = 'url-rels') {
+        try {
+            return {
+                ok:
+                true,
+
+                entities:
+                await fetchMbReleaseEntities(
+                    entityType,
+                    releaseMbid,
+                    includes
+                ),
+
+                error:
+                null
+            };
+        } catch (error) {
+            console.warn(
+                `[Harmony Beatport Recovery] Release Actions ${entityType} lookup failed.`,
+                error
+            );
+
+            debugReleaseActions(
+                `MusicBrainz ${entityType} browse failed.`,
+                error
+            );
+
+            return {
+                ok:
+                false,
+
+                entities:
+                [],
+
+                error
+            };
+        }
+    }
+
+    function mbReleaseTracks(release) {
+        return (
+            release?.media ||
+            []
+        ).flatMap(
+            medium =>
+            medium?.tracks ||
+            []
+        );
+    }
+
+    function mbReleaseArtists(release) {
+        const result =
+              new Map();
+
+        const addCredit =
+              credit => {
+                  const artist =
+                        credit?.artist;
+
+                  if (
+                      !artist?.id ||
+                      !clean(
+                          artist.name
+                      )
+                  ) {
+                      return;
+                  }
+
+                  result.set(
+                      artist.id,
+                      {
+                          mbid:
+                          artist.id,
+
+                          name:
+                          artist.name
+                      }
+                  );
+              };
+
+        (
+            release?.['artist-credit'] ||
+            []
+        ).forEach(
+            addCredit
+        );
+
+        for (
+            const track
+            of mbReleaseTracks(
+                release
+            )
+        ) {
+            (
+                track?.['artist-credit'] ||
+                track?.recording?.['artist-credit'] ||
+                []
+            ).forEach(
+                addCredit
+            );
+        }
+
+        return [
+            ...result.values()
+        ];
+    }
+
+    function mbReleaseLabels(release) {
+        return (
+            release?.['label-info'] ||
+            []
+        )
+            .map(
+            info => ({
+                mbid:
+                info?.label?.id ||
+                '',
+
+                name:
+                clean(
+                    info?.label?.name
+                ),
+
+                catalogNumber:
+                clean(
+                    info?.['catalog-number']
+                )
+            })
+        )
+            .filter(
+            label =>
+            label.mbid &&
+            label.name
+        );
+    }
+
+    function flattenMbReleaseTracks(mbRelease) {
+        return (
+            mbRelease?.media ||
+            []
+        )
+            .flatMap(
+            medium =>
+            medium?.tracks ||
+            []
+        );
+    }
+
+    function beatportReleaseArtists(release) {
+        const result =
+              new Map();
+
+        const addArtist =
+              artist => {
+                  if (
+                      artist?.id == null ||
+                      !clean(
+                          artist.name
+                      )
+                  ) {
+                      return;
+                  }
+
+                  result.set(
+                      String(
+                          artist.id
+                      ),
+                      artist
+                  );
+              };
+
+        (
+            release?.artists ||
+            []
+        ).forEach(
+            addArtist
+        );
+
+        if (
+            release?.tracklistComplete
+        ) {
+            for (
+                const track
+                of release.tracks ||
+                []
+            ) {
+                (
+                    track?.artists ||
+                    []
+                ).forEach(
+                    addArtist
+                );
+            }
+        }
+
+        return [
+            ...result.values()
+        ];
+    }
+
+    function findUniqueNameMatch(name, candidates) {
+        const wanted =
+              normalizeName(
+                  name
+              );
+
+        if (!wanted) {
+            return null;
+        }
+
+        const matches =
+              candidates.filter(
+                  candidate =>
+                  normalizeName(
+                      candidate.name
+                  ) ===
+                  wanted
+              );
+
+        return matches.length === 1
+            ? matches[0]
+        : null;
+    }
+
+    function beatportLabelUrl(label) {
+        if (
+            label?.id == null
+        ) {
+            return null;
+        }
+
+        return (
+            `https://www.beatport.com/label/` +
+            `${slugify(label.name || 'label')}/` +
+            `${label.id}`
+        );
+    }
+
+    /*
+     * Reduce a Beatport entity URL to its stable identity.
+     *
+     * The slug is cosmetic. If MusicBrainz contains:
+     *
+     *   /artist/old-slug/123
+     *
+     * and Beatport now gives:
+     *
+     *   /artist/new-slug/123
+     *
+     * those are still the same external entity and should not be
+     * suggested twice.
+     */
+    function beatportEntityIdentity(url) {
+        try {
+            const parsed =
+                  new URL(url);
+
+            if (
+                parsed.hostname !==
+                'www.beatport.com'
+            ) {
+                return '';
+            }
+
+            const parts =
+                  parsed.pathname
+            .split('/')
+            .filter(Boolean);
+
+            if (
+                parts.length >= 4 &&
+                /^[a-z]{2}$/i.test(
+                    parts[0]
+                )
+            ) {
+                parts.shift();
+            }
+
+            const type =
+                  parts[0];
+
+            const id =
+                  parts.at(-1);
+
+            if (
+                ![
+                    'artist',
+                    'label',
+                    'release',
+                    'track'
+                ].includes(type) ||
+                !/^\d+$/.test(id)
+            ) {
+                return '';
+            }
+
+            return (
+                `${type}:` +
+                `${id}`
+            );
+        } catch {
+            return '';
+        }
+    }
+
+    function mbEntityRelations(entity) {
+        return (
+            entity?.relations ||
+            []
+        )
+            .map(
+            relation =>
+            relation?.url
+            ?.resource
+        )
+            .filter(Boolean);
+    }
+
+    function alreadyHasBeatportUrl(mbEntity, beatportUrl) {
+        const wantedIdentity =
+              beatportEntityIdentity(
+                  beatportUrl
+              );
+
+        if (!wantedIdentity) {
+            return false;
+        }
+
+        return mbEntityRelations(
+            mbEntity
+        ).some(
+            existing =>
+            beatportEntityIdentity(
+                existing
+            ) ===
+            wantedIdentity
+        );
+    }
+
+    function entityCacheMap(entities) {
+        return new Map(
+            (
+                entities ||
+                []
+            )
+            .filter(
+                entity =>
+                entity?.id
+            )
+            .map(
+                entity => [
+                    entity.id,
+                    entity
+                ]
+            )
+        );
+    }
+
+    function makeReleaseActionCandidates(mbRelease, beatportRelease) {
+        const candidates =
+              [];
+
+        //
+        // ARTISTS
+        //
+
+        const mbArtists =
+              mbReleaseArtists(
+                  mbRelease
+              );
+
+        for (
+            const artist
+            of beatportReleaseArtists(
+                beatportRelease
+            )
+        ) {
+            const match =
+                  findUniqueNameMatch(
+                      artist.name,
+                      mbArtists
+                  );
+
+            if (!match) {
+                console.warn(
+                    '[Harmony Beatport Recovery] Could not uniquely match Beatport artist to MusicBrainz artist.',
+                    artist
+                );
+
+                continue;
+            }
+
+            const url =
+                  beatportArtistUrl(
+                      artist
+                  );
+
+            if (!url) {
+                continue;
+            }
+
+            candidates.push({
+                entityType:
+                'artist',
+
+                mbid:
+                match.mbid,
+
+                name:
+                match.name,
+
+                beatportUrl:
+                url,
+
+                linkTypeId:
+                MB.entityDownload
+                .artist
+            });
+        }
+
+
+        //
+        // LABEL
+        //
+
+        if (
+            beatportRelease?.label
+            ?.id != null &&
+            clean(
+                beatportRelease.label
+                .name
+            )
+        ) {
+            const mbLabels =
+                  mbReleaseLabels(
+                      mbRelease
+                  );
+
+            const match =
+                  findUniqueNameMatch(
+                      beatportRelease
+                      .label.name,
+                      mbLabels
+                  );
+
+            if (match) {
+                candidates.push({
+                    entityType:
+                    'label',
+
+                    mbid:
+                    match.mbid,
+
+                    name:
+                    match.name,
+
+                    beatportUrl:
+                    beatportLabelUrl(
+                        beatportRelease
+                        .label
+                    ),
+
+                    linkTypeId:
+                    MB.entityDownload
+                    .label
+                });
+            } else {
+                console.warn(
+                    '[Harmony Beatport Recovery] Could not uniquely match Beatport label to MusicBrainz label.',
+                    beatportRelease.label
+                );
+            }
+        }
+
+
+        //
+        // RECORDINGS
+        //
+        // Harmony structurally merges provider tracklists by position.
+        // We do the same, but retain a sanity check because HBR is
+        // operating outside Harmony's makeReleasesCompatible() stage.
+        //
+
+        if (
+            beatportRelease
+            ?.tracklistComplete &&
+            Array.isArray(
+                beatportRelease.tracks
+            )
+        ) {
+            const mbTracks =
+                  mbReleaseTracks(
+                      mbRelease
+                  );
+
+            const bpTracks =
+                  beatportRelease
+            .tracks;
+
+            if (
+                mbTracks.length !==
+                bpTracks.length
+            ) {
+                console.warn(
+                    '[Harmony Beatport Recovery] Release Actions recording links skipped because MusicBrainz and Beatport track counts differ.',
+                    {
+                        musicBrainz:
+                        mbTracks.length,
+
+                        beatport:
+                        bpTracks.length
+                    }
+                );
+            } else {
+                for (
+                    let index = 0;
+                    index <
+                    mbTracks.length;
+                    index++
+                ) {
+                    const mbTrack =
+                          mbTracks[index];
+
+                    const bpTrack =
+                          bpTracks[index];
+
+                    const recordingMbid =
+                          mbTrack
+                    ?.recording
+                    ?.id;
+
+                    if (
+                        !recordingMbid ||
+                        !bpTrack?.id
+                    ) {
+                        continue;
+                    }
+
+                    const mbTitle =
+                          normalizeName(
+                              mbTrack.title ||
+                              mbTrack.recording
+                              ?.title
+                          );
+
+                    const bpTitle =
+                          normalizeName(
+                              bpTrack.title
+                          );
+
+                    const mbIsrcs =
+                          new Set(
+                              (
+                                  mbTrack
+                                  ?.recording
+                                  ?.isrcs ||
+                                  []
+                              )
+                              .map(
+                                  normalizeIsrc
+                              )
+                              .filter(Boolean)
+                          );
+
+                    const bpIsrc =
+                          normalizeIsrc(
+                              bpTrack.isrc
+                          );
+
+                    const titleMatches =
+                          Boolean(
+                              mbTitle &&
+                              bpTitle &&
+                              mbTitle ===
+                              bpTitle
+                          );
+
+                    const isrcMatches =
+                          Boolean(
+                              bpIsrc &&
+                              mbIsrcs.has(
+                                  bpIsrc
+                              )
+                          );
+
+                    /*
+                     * Position establishes correspondence, matching
+                     * Harmony's own merge model.
+                     *
+                     * Title or ISRC confirms that position is sane.
+                     */
+                    if (
+                        !titleMatches &&
+                        !isrcMatches
+                    ) {
+                        console.warn(
+                            '[Harmony Beatport Recovery] Release Actions recording match rejected.',
+                            {
+                                position:
+                                index + 1,
+
+                                musicBrainz:
+                                {
+                                    title:
+                                    mbTrack.title,
+
+                                    recordingMbid,
+
+                                    isrcs:
+                                    [
+                                        ...mbIsrcs
+                                    ]
+                                },
+
+                                beatport:
+                                bpTrack
+                            }
+                        );
+
+                        continue;
+                    }
+
+                    candidates.push({
+                        entityType:
+                        'recording',
+
+                        mbid:
+                        recordingMbid,
+
+                        name:
+                        mbTrack.title ||
+                        mbTrack.recording
+                        ?.title ||
+                        bpTrack.title ||
+                        '[unknown]',
+
+                        beatportUrl:
+                        trackUrl(
+                            bpTrack
+                        ),
+
+                        linkTypeId:
+                        MB.entityDownload
+                        .recording
+                    });
+                }
+            }
+        }
+
+        return candidates.filter(
+            candidate =>
+            candidate.beatportUrl
+        );
+    }
+
+    function actionEditPrefix(entityType) {
+        return (
+            `edit-${entityType}`
+        );
+    }
+
+    function candidateEditUrl(candidate, releaseMbid) {
+        const url =
+              new URL(
+                  `https://musicbrainz.org/` +
+                  `${candidate.entityType}/` +
+                  `${candidate.mbid}/edit`
+              );
+
+        const prefix =
+              actionEditPrefix(
+                  candidate.entityType
+              );
+
+        url.searchParams.set(
+            `${prefix}.url.0.text`,
+            candidate.beatportUrl
+        );
+
+        url.searchParams.set(
+            `${prefix}.url.0.link_type_id`,
+            candidate.linkTypeId
+        );
+
+        url.searchParams.set(
+            `${prefix}.edit_note`,
+            `Matched ${candidate.entityType} while importing ` +
+            `https://musicbrainz.org/release/${releaseMbid} with Harmony`
+        );
+
+        return url;
+    }
+
+    function ensureOpenAllRecordingLinksButton() {
+        const recordingLinks =
+              () =>
+        $$('.action a[href]')
+        .filter(
+            link => {
+                try {
+                    return /^\/recording\/[^/]+\/edit$/.test(
+                        new URL(
+                            link.href,
+                            location.href
+                        ).pathname
+                    );
+                } catch {
+                    return false;
+                }
+            }
+        );
+
+        const links =
+              recordingLinks();
+
+        if (!links.length) {
+            return;
+        }
+
+        let button =
+            $('button.open-all-links');
+
+        /*
+     * Harmony did not create an Open All button because it had
+     * no recording-link actions of its own.
+     *
+     * Find the recording actions HBR/Harmony now has and create
+     * the same basic action-group control ahead of them.
+     */
+        if (!button) {
+            const firstRecordingAction =
+                  links[0]
+            .closest(
+                '.action'
+            );
+
+            if (!firstRecordingAction) {
+                return;
+            }
+
+            let group =
+                firstRecordingAction.closest(
+                    '.action-group'
+                );
+
+            /*
+         * HBR-created recording actions may not already live in
+         * an action-group, so create one and move the contiguous
+         * recording actions into it.
+         */
+            if (!group) {
+                group =
+                    el(
+                    'div',
+                    {
+                        class:
+                        'action-group'
+                    }
+                );
+
+                firstRecordingAction.before(
+                    group
+                );
+
+                for (
+                    const link
+                    of links
+                ) {
+                    const action =
+                          link.closest(
+                              '.action'
+                          );
+
+                    if (
+                        action &&
+                        action.parentElement !==
+                        group
+                    ) {
+                        group.append(
+                            action
+                        );
+                    }
+                }
+            }
+
+            const openAllAction =
+                  el(
+                      'div',
+                      {
+                          class:
+                          'action'
+                      },
+
+                      el(
+                          'svg',
+                          {
+                              class:
+                              'icon',
+
+                              width:
+                              24,
+
+                              height:
+                              24,
+
+                              'stroke-width':
+                              2,
+
+                              html:
+                              '<use xlink:href="/icon-sprite.svg#external-link"></use>'
+                          }
+                      )
+                  );
+
+            button =
+                el(
+                'button',
+                {
+                    type:
+                    'button',
+
+                    class:
+                    'open-all-links'
+                }
+            );
+
+            openAllAction.append(
+                button
+            );
+
+            group.prepend(
+                openAllAction
+            );
+        }
+
+        /*
+     * Clone Harmony's button if necessary to remove its hydrated
+     * Fresh listener, which contains the original unpatched URLs.
+     */
+        if (
+            button.dataset.hbrPatched !==
+            '1'
+        ) {
+            const replacement =
+                  button.cloneNode(
+                      true
+                  );
+
+            replacement.dataset.hbrPatched =
+                '1';
+
+            button.replaceWith(
+                replacement
+            );
+
+            button =
+                replacement;
+
+            button.addEventListener(
+                'click',
+                () => {
+                    for (
+                        const link
+                        of recordingLinks()
+                    ) {
+                        window.open(
+                            link.href,
+                            '_blank',
+                            'noopener'
+                        );
+                    }
+                }
+            );
+        }
+
+        const count =
+              recordingLinks()
+        .length;
+
+        button.textContent =
+            `Open all ${count} recording link${
+        count === 1
+            ? ''
+        : 's'
+    }`;
+
+        button.title =
+            `This will open ${count} tab${
+        count === 1
+            ? ''
+        : 's'
+    } (pop-up)`;
+    }
+
+    function existingHarmonyAction(candidate) {
+        const wanted =
+              `/${candidate.entityType}/` +
+              `${candidate.mbid}/edit`;
+
+        return $$('.action')
+            .find(
+            action =>
+            $$('a[href]', action)
+            .some(
+                link => {
+                    try {
+                        return (
+                            new URL(
+                                link.href,
+                                location.href
+                            ).pathname ===
+                            wanted
+                        );
+                    } catch {
+                        return false;
+                    }
+                }
+            )
+        ) || null;
+    }
+
+    function existingActionEditLink(action, candidate) {
+        const wanted =
+              `/${candidate.entityType}/` +
+              `${candidate.mbid}/edit`;
+
+        return $$(
+            'a[href]',
+            action
+        ).find(
+            link => {
+                try {
+                    return (
+                        new URL(
+                            link.href,
+                            location.href
+                        ).pathname ===
+                        wanted
+                    );
+                } catch {
+                    return false;
+                }
+            }
+        ) || null;
+    }
+
+    function appendCandidateToEditUrl(link, candidate, releaseMbid) {
+        const url =
+              new URL(
+                  link.href,
+                  location.href
+              );
+
+        const prefix =
+              actionEditPrefix(
+                  candidate.entityType
+              );
+
+        const indexes =
+              [
+                  ...url.searchParams
+                  .keys()
+              ]
+        .map(
+            key =>
+            key.match(
+                new RegExp(
+                    `^${prefix.replace(
+                        /[.*+?^${}()|[\]\\]/g,
+                        '\\$&'
+                    )}\\.url\\.(\\d+)\\.text$`
+                )
+            )
+        )
+        .filter(Boolean)
+        .map(
+            match =>
+            Number(
+                match[1]
+            )
+        );
+
+        const existing =
+              indexes.some(
+                  index =>
+                  beatportEntityIdentity(
+                      url.searchParams.get(
+                          `${prefix}.url.${index}.text`
+                      )
+                  ) ===
+                  beatportEntityIdentity(
+                      candidate.beatportUrl
+                  )
+              );
+
+        if (existing) {
+            return;
+        }
+
+        const index =
+              indexes.length
+        ? Math.max(
+            ...indexes
+        ) + 1
+        : 0;
+
+        url.searchParams.set(
+            `${prefix}.url.${index}.text`,
+            candidate.beatportUrl
+        );
+
+        url.searchParams.set(
+            `${prefix}.url.${index}.link_type_id`,
+            candidate.linkTypeId
+        );
+
+        if (
+            !url.searchParams.has(
+                `${prefix}.edit_note`
+            )
+        ) {
+            url.searchParams.set(
+                `${prefix}.edit_note`,
+                `Matched ${candidate.entityType} while importing ` +
+                `https://musicbrainz.org/release/${releaseMbid} with Harmony`
+            );
+        }
+
+        link.href =
+            url.href;
+    }
+
+    function ensureCandidateProviderIcon(action, candidate) {
+        const identity =
+              beatportEntityIdentity(
+                  candidate.beatportUrl
+              );
+
+        if (!identity) {
+            return;
+        }
+
+        if (
+            $$(
+                'a[href]',
+                action
+            ).some(
+                link =>
+                beatportEntityIdentity(
+                    link.href
+                ) ===
+                identity
+            )
+        ) {
+            return;
+        }
+
+        const entityLinks =
+              $('.entity-links', action);
+
+        if (!entityLinks) {
+            return;
+        }
+
+        entityLinks.prepend(
+            el(
+                'a',
+                {
+                    href:
+                    candidate.beatportUrl,
+
+                    target:
+                    '_blank',
+
+                    rel:
+                    'noopener noreferrer'
+                },
+
+                beatportIcon(
+                    18,
+                    1.5
+                )
+            )
+        );
+    }
+
+    function makeReleaseAction(candidate, releaseMbid) {
+        const editUrl =
+              candidateEditUrl(
+                  candidate,
+                  releaseMbid
+              );
+
+        const entityLinks =
+              el(
+                  'span',
+                  {
+                      class:
+                      'entity-links'
+                  }
+              );
+
+        entityLinks.append(
+            el(
+                'a',
+                {
+                    href:
+                    candidate.beatportUrl,
+
+                    target:
+                    '_blank',
+
+                    rel:
+                    'noopener noreferrer'
+                },
+
+                beatportIcon(
+                    18,
+                    1.5
+                )
+            ),
+
+            el(
+                'a',
+                {
+                    href:
+                    `https://musicbrainz.org/` +
+                    `${candidate.entityType}/` +
+                    `${candidate.mbid}`,
+
+                    target:
+                    '_blank',
+
+                    rel:
+                    'noopener noreferrer'
+                },
+
+                el(
+                    'span',
+                    {
+                        class:
+                        'musicbrainz',
+
+                        title:
+                        'MusicBrainz'
+                    },
+
+                    el(
+                        'svg',
+                        {
+                            class:
+                            'icon',
+
+                            width:
+                            18,
+
+                            height:
+                            18,
+
+                            'stroke-width':
+                            1.5,
+
+                            html:
+                            '<use xlink:href="/icon-sprite.svg#brand-metabrainz"></use>'
+                        }
+                    )
+                ),
+
+                candidate.name
+            )
+        );
+
+        const action =
+              el(
+                  'div',
+                  {
+                      class:
+                      'action',
+
+                      'data-hbr-release-action':
+                      `${candidate.entityType}:${candidate.mbid}`
+                  },
+
+                  el(
+                      'svg',
+                      {
+                          class:
+                          'icon',
+
+                          width:
+                          24,
+
+                          height:
+                          24,
+
+                          'stroke-width':
+                          1.25,
+
+                          html:
+                          '<use xlink:href="/icon-sprite.svg#link"></use>'
+                      }
+                  ),
+
+                  el(
+                      'div',
+                      {},
+
+                      el(
+                          'p',
+                          {},
+
+                          el(
+                              'a',
+                              {
+                                  href:
+                                  editUrl.href,
+
+                                  text:
+                                  'Link external IDs'
+                              }
+                          ),
+
+                          ' of ',
+
+                          entityLinks,
+
+                          ' to MusicBrainz'
+                      )
+                  )
+              );
+
+        return action;
+    }
+
+    function makeReleaseIsrcAction(mbRelease, beatportRelease) {
+        if (
+            !beatportRelease?.tracklistComplete ||
+            !Array.isArray(
+                beatportRelease.tracks
+            )
+        ) {
+            debugReleaseActions(
+                'ISRC recovery skipped: Beatport Level 2 track data is not cached.'
+            );
+
+            return null;
+        }
+
+        const harmonyIsrcs =
+              releaseActionsExistingIsrcs();
+
+        if (
+            harmonyIsrcs.length
+        ) {
+            debugReleaseActions(
+                'ISRC recovery skipped: Harmony already created an ISRC submission.',
+                harmonyIsrcs
+            );
+
+            return null;
+        }
+
+        const mbTracks =
+              flattenMbReleaseTracks(
+                  mbRelease
+              );
+
+        const beatportTracks =
+              beatportRelease.tracks;
+
+        if (
+            !mbTracks.length ||
+            mbTracks.length !==
+            beatportTracks.length
+        ) {
+            debugReleaseActions(
+                'ISRC recovery skipped: track counts do not match.',
+                {
+                    musicBrainz:
+                    mbTracks.length,
+
+                    beatport:
+                    beatportTracks.length
+                }
+            );
+
+            return null;
+        }
+
+        const tracks =
+              [];
+
+        let missingCount =
+            0;
+
+        for (
+            let index = 0;
+            index < mbTracks.length;
+            index++
+        ) {
+            const mbTrack =
+                  mbTracks[index];
+
+            const beatportTrack =
+                  beatportTracks[index];
+
+            const beatportIsrc =
+                  normalizeIsrc(
+                      beatportTrack?.isrc
+                  );
+
+            const existingIsrcs =
+                  (
+                      mbTrack
+                      ?.recording
+                      ?.isrcs ||
+                      []
+                  )
+            .map(
+                normalizeIsrc
+            )
+            .filter(Boolean);
+
+            const missing =
+                  Boolean(
+                      beatportIsrc &&
+                      !existingIsrcs.includes(
+                          beatportIsrc
+                      )
+                  );
+
+            if (missing) {
+                missingCount++;
+            }
+
+            /*
+         * Keep every track position.
+         *
+         * MagicISRC is positional. Blank tracks must remain
+         * blank rather than shifting later ISRCs forward.
+         */
+            tracks.push({
+                position:
+                index + 1,
+
+                recordingMbid:
+                mbTrack
+                ?.recording
+                ?.id ||
+                '',
+
+                title:
+                clean(
+                    mbTrack?.title
+                ),
+
+                beatportIsrc,
+
+                existingIsrcs,
+
+                missing,
+
+                /*
+             * Only missing ISRCs are actually submitted.
+             * Existing ones become blank parameters.
+             */
+                submissionIsrc:
+                missing
+                ? beatportIsrc
+                : ''
+            });
+        }
+
+        if (!missingCount) {
+            debugReleaseActions(
+                'ISRC recovery skipped: all Beatport ISRCs already exist on MusicBrainz.'
+            );
+
+            return null;
+        }
+
+        return {
+            type:
+            'isrc',
+
+            source:
+            'Beatport',
+
+            sourceUrl:
+            beatportRelease.releaseUrl,
+
+            releaseMbid:
+            mbRelease.id,
+
+            tracks,
+
+            missingCount
+        };
+    }
+
+    function placeReleaseAction(action, candidate) {
+        const sameType =
+              $$('.action')
+        .filter(
+            existing =>
+            $$(
+                'a[href]',
+                existing
+            ).some(
+                link => {
+                    try {
+                        return new URL(
+                            link.href,
+                            location.href
+                        ).pathname
+                            .startsWith(
+                            `/${candidate.entityType}/`
+                        );
+                    } catch {
+                        return false;
+                    }
+                }
+            )
+        );
+
+        const peer =
+              sameType.at(-1);
+
+        if (peer) {
+            peer.after(
+                action
+            );
+
+            return;
+        }
+
+        $('main')?.append(
+            action
+        );
+    }
+
+    function renderReleaseActionCandidate(candidate, releaseMbid) {
+        let action =
+            existingHarmonyAction(
+                candidate
+            );
+
+        if (action) {
+            const editLink =
+                  existingActionEditLink(
+                      action,
+                      candidate
+                  );
+
+            if (editLink) {
+                appendCandidateToEditUrl(
+                    editLink,
+                    candidate,
+                    releaseMbid
+                );
+            }
+
+            ensureCandidateProviderIcon(
+                action,
+                candidate
+            );
+
+            return;
+        }
+
+        const marker =
+              `[data-hbr-release-action="${candidate.entityType}:${candidate.mbid}"]`;
+
+        if ($(marker)) {
+            return;
+        }
+
+        action =
+            makeReleaseAction(
+            candidate,
+            releaseMbid
+        );
+
+        placeReleaseAction(
+            action,
+            candidate
+        );
+    }
+
+    function renderReleaseIsrcAction(action) {
+        if (
+            !action ||
+            !action.missingCount
+        ) {
+            return false;
+        }
+
+        /*
+     * Defensive check.
+     *
+     * The builder already skips if Harmony supplied an ISRC
+     * action, but never create a second MagicISRC action.
+     */
+        if (
+            $('.magic-isrc')
+        ) {
+            return false;
+        }
+
+        const url =
+              releaseIsrcActionUrl(
+                  action
+              );
+
+        const actionElement =
+              el(
+                  'div',
+                  {
+                      class:
+                      'action'
+                  },
+
+                  el(
+                      'svg',
+                      {
+                          class:
+                          'icon',
+
+                          width:
+                          '24',
+
+                          height:
+                          '24',
+
+                          'stroke-width':
+                          '2'
+                      },
+
+                      el(
+                          'use',
+                          {
+                              'xlink:href':
+                              '/icon-sprite.svg#disc'
+                          }
+                      )
+                  ),
+
+                  el(
+                      'p',
+                      {},
+
+                      el(
+                          'a',
+                          {
+                              class:
+                              'magic-isrc',
+
+                              href:
+                              url.href,
+
+                              text:
+                              'Open with MagicISRC'
+                          }
+                      ),
+
+                      ': Submit ISRCs from ',
+
+                      el(
+                          'a',
+                          {
+                              href:
+                              action.sourceUrl,
+
+                              target:
+                              '_blank',
+
+                              rel:
+                              'noopener noreferrer',
+
+                              text:
+                              'Beatport'
+                          }
+                      ),
+
+                      ' to MusicBrainz'
+                  )
+              );
+
+        const firstCover =
+              $('.cover-image');
+
+        if (firstCover) {
+            firstCover.before(
+                actionElement
+            );
+        } else {
+            $('main')?.append(
+                actionElement
+            );
+        }
+
+        debugReleaseActions(
+            'Rendered Beatport MagicISRC action.',
+            action
+        );
+
+        return true;
+    }
+
+    function releaseActionsBeatportId(message) {
+        if (!message) {
+            return '';
+        }
+
+        for (
+            const link
+            of $$(
+                'a[href]',
+                message
+            )
+        ) {
+            try {
+                const url =
+                      new URL(
+                          link.href,
+                          location.href
+                      );
+
+                if (
+                    ![
+                        'beatport.com',
+                        'www.beatport.com'
+                    ].includes(
+                        url.hostname
+                    )
+                ) {
+                    continue;
+                }
+
+                const match =
+                      url.pathname.match(
+                          /^\/release\/[^/]+\/(\d+)\/?$/
+                      );
+
+                if (match) {
+                    return match[1];
+                }
+            } catch {
+                // Ignore malformed links.
+            }
+        }
+
+        return '';
+    }
+
+    function releaseIsrcActionUrl(action) {
+        const url =
+              new URL(
+                  'https://magicisrc.kepstin.ca'
+              );
+
+        for (
+            const track
+            of action.tracks
+        ) {
+            url.searchParams.set(
+                `isrc${track.position}`,
+                track.submissionIsrc
+            );
+        }
+
+        url.searchParams.set(
+            'musicbrainzid',
+            action.releaseMbid
+        );
+
+        url.searchParams.set(
+            'edit-note',
+            `Import ISRCs from ${action.sourceUrl} to https://musicbrainz.org/release/${action.releaseMbid}`
+        );
+
+        return url;
+    }
+
+    function setReleaseActionsStatus(message,
+                                      {
+        state = 'info',
+        title = 'Beatport Recovery',
+        text = '',
+        details = []
+    } = {}
+                                     ) {
+        if (!message) {
+            return;
+        }
+
+        message.classList.remove(
+            'error',
+            'warning',
+            'info',
+            'success'
+        );
+
+        message.style.borderColor = '';
+        message.style.backgroundColor = '';
+        message.style.color = '';
+
+        if (state === 'success') {
+            message.classList.add(
+                'info'
+            );
+
+            message.style.borderColor =
+                '#4CAF50';
+
+            message.style.backgroundColor =
+                '#e8f5e9';
+
+            message.style.color =
+                '#1b5e20';
+        } else {
+            message.classList.add(
+                state
+            );
+
+            message.style.borderColor =
+                '';
+
+            message.style.backgroundColor =
+                '';
+        }
+        const content =
+              messageContent(
+                  message
+              );
+
+        if (!content) {
+            return;
+        }
+
+        const body =
+              el(
+                  'div'
+              );
+
+        body.append(
+            el(
+                'p',
+                {},
+                el(
+                    'strong',
+                    {
+                        text:
+                        `${title}: `
+                    }
+                ),
+                text
+            )
+        );
+
+        for (
+            const detail
+            of details
+        ) {
+            if (!detail) {
+                continue;
+            }
+
+            body.append(
+                el(
+                    'p',
+                    {
+                        text:
+                        detail
+                    }
+                )
+            );
+        }
+
+        content.replaceChildren(
+            ...body.childNodes
+        );
+    }
+
+    function musicBrainzErrorDescription(error) {
+        const status =
+              Number(
+                  error?.status
+              );
+
+        if (status === 429) {
+            return (
+                'MusicBrainz rate limited the request.'
+            );
+        }
+
+        if (
+            [
+                502,
+                503,
+                504
+            ].includes(
+                status
+            )
+        ) {
+            return (
+                `MusicBrainz returned ${status} and appears to be temporarily unavailable.`
+            );
+        }
+
+        if (status) {
+            return (
+                `MusicBrainz returned HTTP ${status}.`
+            );
+        }
+
+        return (
+            'The MusicBrainz request failed.'
+        );
+    }
+
+    function appendReleaseActionsRetryButton(message, text, onClick) {
+        const content =
+              messageContent(
+                  message
+              );
+
+        if (!content) {
+            return;
+        }
+
+        $('#hbr-release-actions-retry')
+            ?.remove();
+
+        const button =
+              el(
+                  'button',
+                  {
+                      id:
+                      'hbr-release-actions-retry',
+
+                      type:
+                      'button',
+
+                      text,
+
+                      style: {
+                          marginTop:
+                          '8px',
+
+                          padding:
+                          '6px 12px',
+
+                          border:
+                          '1px solid #777',
+
+                          borderRadius:
+                          '4px',
+
+                          cursor:
+                          'pointer',
+
+                          fontSize:
+                          '0.9em',
+
+                          fontWeight:
+                          'bold'
+                      }
+                  }
+              );
+
+        button.addEventListener(
+            'click',
+
+            async () => {
+                button.disabled =
+                    true;
+
+                button.textContent =
+                    'Retrying…';
+
+                try {
+                    await onClick();
+                } catch (error) {
+                    console.warn(
+                        '[Harmony Beatport Recovery] MusicBrainz retry failed.',
+                        error
+                    );
+
+                    button.disabled =
+                        false;
+
+                    button.textContent =
+                        text;
+                }
+            }
+        );
+
+        content.append(
+            button
+        );
+    }
+
+    async function retryFailedReleaseActionLookups(beatportMessage, releaseMbid, beatportReleaseId, candidates, failedTypes, totals) {
+        const types =
+              [
+                  ...new Set(
+                      failedTypes
+                  )
+              ]
+        .filter(
+            type =>
+            [
+                'artist',
+                'label',
+                'recording'
+            ].includes(
+                type
+            )
+        );
+
+        if (!types.length) {
+            return;
+        }
+
+        const retryCandidateCount =
+              candidates.filter(
+                  candidate =>
+                  types.includes(
+                      candidate.entityType
+                  )
+              ).length;
+
+        const baseUnverifiable =
+              totals.baseUnverifiable ??
+              Math.max(
+                  0,
+                  totals.unverifiable -
+                  retryCandidateCount
+              );
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'info',
+
+                text:
+                `Retrying failed MusicBrainz lookup${
+                types.length === 1
+                ? ''
+                : 's'
+            }: ${types.join(', ')}…`
+            }
+        );
+
+        const results =
+              {};
+
+        /*
+     * Keep these sequential so we continue respecting the
+     * MusicBrainz request spacing already enforced by
+     * musicBrainzJson().
+     */
+        for (
+            const type
+            of types
+        ) {
+            results[type] =
+                await fetchMbReleaseEntitiesSafe(
+                type,
+                releaseMbid,
+                'url-rels'
+            );
+        }
+
+        const remainingFailures =
+              [];
+
+        let rendered =
+            0;
+
+        let alreadyPresent =
+            0;
+
+        let unverifiable =
+            0;
+
+        for (
+            const type
+            of types
+        ) {
+            const result =
+                  results[type];
+
+            if (!result?.ok) {
+                remainingFailures.push(
+                    type
+                );
+
+                continue;
+            }
+
+            const cache =
+                  entityCacheMap(
+                      result.entities
+                  );
+
+            const matchingCandidates =
+                  candidates.filter(
+                      candidate =>
+                      candidate.entityType ===
+                      type
+                  );
+
+            for (
+                const candidate
+                of matchingCandidates
+            ) {
+                const mbEntity =
+                      cache.get(
+                          candidate.mbid
+                      );
+
+                if (!mbEntity) {
+                    unverifiable++;
+
+                    console.warn(
+                        '[Harmony Beatport Recovery] Retried MusicBrainz entity was not returned by browse API.',
+                        candidate
+                    );
+
+                    continue;
+                }
+
+                if (
+                    alreadyHasBeatportUrl(
+                        mbEntity,
+                        candidate.beatportUrl
+                    )
+                ) {
+                    alreadyPresent++;
+
+                    continue;
+                }
+
+                renderReleaseActionCandidate(
+                    candidate,
+                    releaseMbid
+                );
+
+                rendered++;
+            }
+        }
+
+        const totalRendered =
+              totals.rendered +
+              rendered;
+
+        const totalAlreadyPresent =
+              totals.alreadyPresent +
+              alreadyPresent;
+
+        const failedCandidateCount =
+              candidates.filter(
+                  candidate =>
+                  remainingFailures.includes(
+                      candidate.entityType
+                  )
+              ).length;
+
+        const totalUnverifiable =
+              baseUnverifiable +
+              unverifiable +
+              failedCandidateCount;
+
+        const nextTotals = {
+            rendered:
+            totalRendered,
+
+            alreadyPresent:
+            totalAlreadyPresent,
+
+            unverifiable:
+            totalUnverifiable,
+
+            baseUnverifiable
+        };
+
+        if (
+            remainingFailures.length
+        ) {
+            const errors =
+                  remainingFailures.map(
+                      type =>
+                      `${type}: ${musicBrainzErrorDescription(
+                          results[type]?.error
+                      )}`
+                  );
+
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'warning',
+
+                    text:
+                    `MusicBrainz retry completed partially for release ${beatportReleaseId}.`,
+
+                    details: [
+                        `Still failing: ${remainingFailures.join(', ')}.`,
+                        ...errors,
+                        `${totalRendered} Beatport action(s) added.`,
+                        `${totalAlreadyPresent} relationship(s) already existed.`,
+                        `${totalUnverifiable} candidate(s) could not be verified.`
+                    ]
+                }
+            );
+
+            appendReleaseActionsRetryButton(
+                beatportMessage,
+
+                `Retry ${remainingFailures.join(', ')}`,
+
+                () =>
+                retryFailedReleaseActionLookups(
+                    beatportMessage,
+                    releaseMbid,
+                    beatportReleaseId,
+                    candidates,
+                    remainingFailures,
+                    nextTotals
+                )
+            );
+
+            return;
+        }
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'success',
+
+                text:
+                `Beatport Recovery completed for release ${beatportReleaseId}.`,
+
+                details: [
+                    `${totalRendered} Beatport action(s) added.`,
+                    `${totalAlreadyPresent} relationship(s) already existed.`,
+                    `${totalUnverifiable} candidate(s) could not be verified.`
+                ]
+            }
+        );
+    }
+
+    function startReleaseActionsTrackLookup(beatportMessage, beatportReleaseId, beatportRelease) {
+        const target =
+              new URL(
+                  beatportRelease?.releaseUrl ||
+                  `https://www.beatport.com/release/-/${beatportReleaseId}`
+              );
+
+        const id =
+              requestId();
+
+        target.searchParams.set(
+            'hbr_resolve',
+            id
+        );
+
+        target.searchParams.set(
+            'hbr_release',
+            String(
+                beatportReleaseId
+            )
+        );
+
+        target.searchParams.set(
+            'hbr_resolve_mode',
+            'tracks'
+        );
+
+        autoStartedFor =
+            `release:${beatportReleaseId}:tracks`;
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'info',
+
+                text:
+                `Opening Beatport release ${beatportReleaseId} to retrieve full track data…`
+            }
+        );
+
+        openBeatport(
+            target.toString()
+        );
+
+        return true;
+    }
+
+    async function maybeAutoReleaseActionsLookup(beatportMessage, beatportReleaseId, beatportRelease) {
+        if (
+            !settings.auto
+        ) {
+            return;
+        }
+
+        const key =
+              `release:${beatportReleaseId}:tracks`;
+
+        if (
+            autoStartedFor ===
+            key
+        ) {
+            return;
+        }
+
+        startReleaseActionsTrackLookup(
+            beatportMessage,
+            beatportReleaseId,
+            beatportRelease
+        );
+    }
+
+    function ensureReleaseActionsRecoveryControls(beatportMessage, beatportReleaseId, beatportRelease) {
+        const content =
+              messageContent(
+                  beatportMessage
+              );
+
+        if (!content) {
+            return;
+        }
+
+        if (
+            !$('#' + IDS.settings)
+        ) {
+            content.append(
+                settingsPanel({
+                    showTrackData:
+                    false,
+
+                    onAuto:
+                    () =>
+                    maybeAutoReleaseActionsLookup(
+                        beatportMessage,
+                        beatportReleaseId,
+                        beatportRelease
+                    )
+                })
+            );
+        }
+
+        if (
+            !$('#' + IDS.button)
+        ) {
+            content.append(
+                recoveryButton({
+                    text:
+                    'Retrieve track data',
+
+                    onClick:
+                    () =>
+                    startReleaseActionsTrackLookup(
+                        beatportMessage,
+                        beatportReleaseId,
+                        beatportRelease
+                    )
+                })
+            );
+        }
+    }
+
+    function queueReleaseActions(beatportMessage, beatportReleaseId) {
+        releaseActionsQueue =
+            releaseActionsQueue
+            .then(
+            () =>
+            processReleaseActions(
+                beatportMessage,
+                beatportReleaseId
+            )
+        )
+            .catch(
+            error =>
+            console.warn(
+                '[Harmony Beatport Recovery] Release Actions processing failed.',
+                error
+            )
+        );
+    }
+
+    async function processReleaseActions(beatportMessage, beatportReleaseId) {
+        debugReleaseActions(
+            'Processing Release Actions.',
+            {
+                url:
+                location.href,
+
+                beatportReleaseId
+            }
+        );
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'info',
+
+                text:
+                `Beatport release ${beatportReleaseId} detected. Loading cached Beatport data…`
+            }
+        );
+
+        const releaseMbid =
+              releaseActionsMbid();
+
+        debugReleaseActions(
+            'Release MBID:',
+            releaseMbid
+        );
+
+        if (!releaseMbid) {
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'error',
+
+                    text:
+                    'Could not determine the MusicBrainz release MBID.'
+                }
+            );
+
+            return;
+        }
+
+        /*
+     * Beatport identity comes directly from Harmony's
+     * native Beatport failure message.
+     */
+        const cachedRecord =
+              await getCachedRelease(
+                  beatportReleaseId
+              );
+
+        debugReleaseActions(
+            'Beatport cache record:',
+            cachedRecord
+        );
+
+        if (
+            !cachedRecord?.release
+        ) {
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'warning',
+
+                    text:
+                    `Beatport release ${beatportReleaseId} is not available in the HBR cache.`,
+
+                    details: [
+                        'Retrieve the exact Beatport release to recover its metadata.'
+                    ]
+                }
+            );
+
+            ensureReleaseActionsRecoveryControls(
+                beatportMessage,
+                beatportReleaseId,
+                null
+            );
+
+            await maybeAutoReleaseActionsLookup(
+                beatportMessage,
+                beatportReleaseId,
+                null
+            );
+
+            return;
+        }
+
+        const beatportRelease =
+              cachedRecord.release;
+
+        const hasTrackData =
+              Boolean(
+                  beatportRelease
+                  .tracklistComplete &&
+                  Array.isArray(
+                      beatportRelease.tracks
+                  )
+              );
+
+        debugReleaseActions(
+            'Beatport metadata level:',
+            hasTrackData
+            ? 'Level 2 — complete track data'
+            : 'Level 1 — release metadata only'
+        );
+
+        // Restore Beatport to the provider list @ top of page
+        ensureProvider(
+            beatportRelease
+        );
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'info',
+
+                text:
+                `Cached Beatport release ${beatportReleaseId} found. Loading MusicBrainz release structure…`
+            }
+        );
+
+        let mbRelease;
+
+        try {
+            mbRelease =
+                await fetchMbReleaseStructure(
+                releaseMbid
+            );
+        } catch (error) {
+            console.warn(
+                '[Harmony Beatport Recovery] Could not load MusicBrainz release structure.',
+                error
+            );
+
+            debugReleaseActions(
+                'MusicBrainz release lookup failed.',
+                error
+            );
+
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'error',
+
+                    text:
+                    musicBrainzErrorDescription(
+                        error
+                    ),
+
+                    details: [
+                        'Beatport Recovery could not load the MusicBrainz release structure.'
+                    ]
+                }
+            );
+
+            appendReleaseActionsRetryButton(
+                beatportMessage,
+                'Retry MusicBrainz lookup',
+
+                () => {
+                    queueReleaseActions(
+                        beatportMessage,
+                        beatportReleaseId
+                    );
+                }
+            );
+
+            return;
+        }
+
+        debugReleaseActions(
+            'MusicBrainz release structure received.',
+            mbRelease
+        );
+
+        const candidates =
+              makeReleaseActionCandidates(
+                  mbRelease,
+                  beatportRelease
+              );
+
+        const isrcAction =
+              makeReleaseIsrcAction(
+                  mbRelease,
+                  beatportRelease
+              );
+
+        debugReleaseActions(
+            'Generated ISRC action:',
+            isrcAction
+        );
+
+        debugReleaseActions(
+            'Generated candidates:',
+            candidates
+        );
+
+        if (!candidates.length) {
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'warning',
+
+                    text:
+                    'Beatport data was found, but no safe MusicBrainz entity matches could be generated.'
+                }
+            );
+
+            if (
+                !hasTrackData
+            ) {
+                ensureReleaseActionsRecoveryControls(
+                    beatportMessage,
+                    beatportReleaseId,
+                    beatportRelease
+                );
+
+                await maybeAutoReleaseActionsLookup(
+                    beatportMessage,
+                    beatportReleaseId,
+                    beatportRelease
+                );
+            }
+
+            return;
+        }
+
+        const artistCandidates =
+              candidates.filter(
+                  candidate =>
+                  candidate.entityType ===
+                  'artist'
+              );
+
+        const labelCandidates =
+              candidates.filter(
+                  candidate =>
+                  candidate.entityType ===
+                  'label'
+              );
+
+        const recordingCandidates =
+              candidates.filter(
+                  candidate =>
+                  candidate.entityType ===
+                  'recording'
+              );
+
+        debugReleaseActions(
+            'Candidate counts:',
+            {
+                artists:
+                artistCandidates.length,
+
+                labels:
+                labelCandidates.length,
+
+                recordings:
+                recordingCandidates.length
+            }
+        );
+
+        setReleaseActionsStatus(
+            beatportMessage,
+            {
+                state:
+                'info',
+
+                text:
+                'Checking existing MusicBrainz external links…',
+
+                details: [
+                    `${artistCandidates.length} artist candidate(s), ` +
+                    `${labelCandidates.length} label candidate(s), ` +
+                    `${recordingCandidates.length} recording candidate(s).`,
+
+                    hasTrackData
+                    ? 'Full Beatport track metadata is cached.'
+                    : 'Beatport track metadata is not cached; recording links and ISRCs will not be checked.'
+                ]
+            }
+        );
+
+        const artistResult =
+              artistCandidates.length
+        ? await fetchMbReleaseEntitiesSafe(
+            'artist',
+            releaseMbid,
+            'url-rels'
+        )
+        : {
+            ok: true,
+            entities: [],
+            error: null
+        };
+
+        debugReleaseActions(
+            'MusicBrainz artist browse result:',
+            artistResult
+        );
+
+        const labelResult =
+              labelCandidates.length
+        ? await fetchMbReleaseEntitiesSafe(
+            'label',
+            releaseMbid,
+            'url-rels'
+        )
+        : {
+            ok: true,
+            entities: [],
+            error: null
+        };
+
+        debugReleaseActions(
+            'MusicBrainz label browse result:',
+            labelResult
+        );
+
+        const recordingResult =
+              recordingCandidates.length
+        ? await fetchMbReleaseEntitiesSafe(
+            'recording',
+            releaseMbid,
+            'url-rels'
+        )
+        : {
+            ok: true,
+            entities: [],
+            error: null
+        };
+
+        debugReleaseActions(
+            'MusicBrainz recording browse result:',
+            recordingResult
+        );
+
+        const failedLookups =
+              [
+                  ['artist', artistResult],
+                  ['label', labelResult],
+                  ['recording', recordingResult]
+              ]
+        .filter(
+            ([, result]) =>
+            !result.ok
+        );
+
+        const artistCache =
+              entityCacheMap(
+                  artistResult.entities
+              );
+
+        const labelCache =
+              entityCacheMap(
+                  labelResult.entities
+              );
+
+        const recordingCache =
+              entityCacheMap(
+                  recordingResult.entities
+              );
+
+        let rendered = 0;
+        let alreadyPresent = 0;
+        let unverifiable = 0;
+
+        for (
+            const candidate
+            of candidates
+        ) {
+            debugReleaseActions(
+                'Processing candidate:',
+                candidate
+            );
+
+            const result = {
+                artist:
+                artistResult,
+
+                label:
+                labelResult,
+
+                recording:
+                recordingResult
+            }[
+                candidate.entityType
+            ];
+
+            /*
+         * If the browse request for this entity type failed,
+         * we cannot safely know whether its Beatport link
+         * already exists.
+         */
+            if (
+                !result.ok
+            ) {
+                unverifiable++;
+
+                debugReleaseActions(
+                    'Candidate skipped because its MusicBrainz relationship lookup failed.',
+                    candidate
+                );
+
+                continue;
+            }
+
+            const cache = {
+                artist:
+                artistCache,
+
+                label:
+                labelCache,
+
+                recording:
+                recordingCache
+            }[
+                candidate.entityType
+            ];
+
+            const mbEntity =
+                  cache.get(
+                      candidate.mbid
+                  );
+
+            if (!mbEntity) {
+                unverifiable++;
+
+                console.warn(
+                    '[Harmony Beatport Recovery] Release Actions entity was not returned by MusicBrainz browse API.',
+                    candidate
+                );
+
+                continue;
+            }
+
+            const exists =
+                  alreadyHasBeatportUrl(
+                      mbEntity,
+                      candidate.beatportUrl
+                  );
+
+            debugReleaseActions(
+                'Existing Beatport relationship check:',
+                {
+                    entityType:
+                    candidate.entityType,
+
+                    mbid:
+                    candidate.mbid,
+
+                    beatportUrl:
+                    candidate.beatportUrl,
+
+                    alreadyExists:
+                    exists,
+
+                    existingUrls:
+                    mbEntityRelations(
+                        mbEntity
+                    )
+                }
+            );
+
+            if (
+                exists
+            ) {
+                alreadyPresent++;
+
+                continue;
+            }
+
+            renderReleaseActionCandidate(
+                candidate,
+                releaseMbid
+            );
+
+            rendered++;
+        }
+        const isrcRendered =
+              renderReleaseIsrcAction(
+                  isrcAction
+              );
+
+        ensureOpenAllRecordingLinksButton();
+
+        /*
+     * Reuse Harmony's native Beatport error box as the
+     * permanent HBR status display.
+     */
+        if (
+            failedLookups.length
+        ) {
+            const failedTypes =
+                  failedLookups
+            .map(
+                ([type]) =>
+                type
+            )
+            .join(', ');
+
+            const serverErrors =
+                  failedLookups
+            .map(
+                ([type, result]) =>
+                `${type}: ${musicBrainzErrorDescription(
+                    result.error
+                )}`
+            );
+
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'warning',
+
+                    text:
+                    `Beatport Recovery completed partially for release ${beatportReleaseId}.`,
+
+                    details: [
+                        `MusicBrainz lookup failure(s): ${failedTypes}.`,
+                        ...serverErrors,
+                        `${rendered} Beatport action(s) added.`,
+                        `${alreadyPresent} relationship(s) already existed.`,
+                        `${unverifiable} candidate(s) could not be verified.`,
+
+                        hasTrackData
+                        ? 'Full Beatport track metadata was available.'
+                        : 'Beatport track metadata was not cached; recording links and ISRCs were not checked.',
+                    ]
+                }
+            );
+
+            appendReleaseActionsRetryButton(
+                beatportMessage,
+
+                `Retry ${failedLookups
+                .map(
+                    ([type]) =>
+                    type
+                )
+                .join(', ')}`,
+
+                () =>
+                retryFailedReleaseActionLookups(
+                    beatportMessage,
+                    releaseMbid,
+                    beatportReleaseId,
+                    candidates,
+
+                    failedLookups.map(
+                        ([type]) =>
+                        type
+                    ),
+
+                    {
+                        rendered,
+                        alreadyPresent,
+                        unverifiable
+                    }
+                )
+            );
+
+        } else {
+            setReleaseActionsStatus(
+                beatportMessage,
+                {
+                    state:
+                    'success',
+
+                    text:
+                    `Beatport Recovery completed for release ${beatportReleaseId}.`,
+
+                    details: [
+                        `${rendered} Beatport action(s) added.`,
+                        `${alreadyPresent} relationship(s) already existed.`,
+
+                        unverifiable
+                        ? `${unverifiable} candidate(s) could not be verified.`
+                        : 'All available candidates were checked successfully.',
+
+                        hasTrackData
+                        ? 'Artist, label and recording links were checked using full Beatport track metadata.'
+                        : 'Only release-level metadata was cached. Artist and label links were checked; recording links and ISRCs were skipped.'
+                    ]
+                }
+            );
+        }
+        if (
+            !hasTrackData
+        ) {
+            ensureReleaseActionsRecoveryControls(
+                beatportMessage,
+                beatportReleaseId,
+                beatportRelease
+            );
+
+            await maybeAutoReleaseActionsLookup(
+                beatportMessage,
+                beatportReleaseId,
+                beatportRelease
+            );
+        }
+        console.info(
+            '[Harmony Beatport Recovery] Release Actions processed.',
+            {
+                releaseMbid,
+
+                beatportReleaseId,
+
+                candidates:
+                candidates.length,
+
+                rendered,
+
+                alreadyPresent,
+
+                unverifiable,
+
+                failedLookups:
+                failedLookups.map(
+                    ([type, result]) => ({
+                        type,
+
+                        status:
+                        result.error?.status ||
+                        null
+                    })
+                )
+            }
+        );
+    }
+
+    async function initReleaseActions() {
+        if (
+            releaseActionsStarted
+        ) {
+            return;
+        }
+
+        const beatportMessage =
+              beatportFailureMessage();
+
+        if (!beatportMessage) {
+            debugReleaseActions(
+                'Release Actions inactive: no native Beatport failure message.'
+            );
+
+            return;
+        }
+
+        const beatportReleaseId =
+              releaseActionsBeatportId(
+                  beatportMessage
+              );
+
+        if (!beatportReleaseId) {
+            debugReleaseActions(
+                'Release Actions inactive: Beatport failure did not expose a release ID.'
+            );
+
+            return;
+        }
+
+        releaseActionsStarted =
+            true;
+
+        await loadSettings();
+
+        debugReleaseActions(
+            'Release Actions activated.',
+            {
+                beatportReleaseId
+            }
+        );
+
+        /*
+     * Release Actions knows the exact Beatport release ID.
+     *
+     * Watch that record directly. When Beatport upgrades the
+     * cache from Level 1 to Level 2, run the same idempotent
+     * processing pipeline again.
+     */
+        releaseActionsReleaseListener =
+            GM_addValueChangeListener(
+            cacheKey(
+                beatportReleaseId
+            ),
+
+            () =>
+            queueReleaseActions(
+                beatportMessage,
+                beatportReleaseId
+            )
+        );
+
+        queueReleaseActions(
+            beatportMessage,
+            beatportReleaseId
+        );
     }
 
     function scheduleHarmonyCheck() {
@@ -3778,6 +7181,18 @@
     function initHarmony() {
         clearResolvedUrlUpcField();
 
+        /*
+     * Release Actions is a separate Harmony workflow.
+     * It does not use the normal failed-provider activation gate.
+     */
+        if (
+            isHarmonyReleaseActions()
+        ) {
+            initReleaseActions();
+
+            return;
+        }
+
         new MutationObserver(
             scheduleHarmonyCheck
         ).observe(
@@ -3796,18 +7211,18 @@
     // =========================================================================
 
     const hasOwn = (object, key) =>
-        Object.prototype.hasOwnProperty.call(
-            object,
-            key
-        );
+    Object.prototype.hasOwnProperty.call(
+        object,
+        key
+    );
 
     function beatportReleaseUrl(releaseId, releaseName, releaseSlug = '') {
         const slug =
-            clean(releaseSlug) ||
-            slugify(
-                releaseName ||
-                'release'
-            );
+              clean(releaseSlug) ||
+              slugify(
+                  releaseName ||
+                  'release'
+              );
 
         return (
             `https://www.beatport.com/release/` +
@@ -3825,7 +7240,7 @@
         }
 
         const legacyId =
-            Number(value.release_id);
+              Number(value.release_id);
 
         if (
             Number.isInteger(legacyId) &&
@@ -3841,7 +7256,7 @@
         }
 
         const v4Id =
-            Number(value.id);
+              Number(value.id);
 
         if (
             Number.isInteger(v4Id) &&
@@ -3868,81 +7283,81 @@
             catalogNumber: release.catalog_number,
 
             label:
-                release.label
-                    ? {
-                        id:
-                            release.label.label_id ??
-                            null,
-                        name:
-                            release.label.label_name ??
-                            null
-                    }
-                    : null,
+            release.label
+            ? {
+                id:
+                release.label.label_id ??
+                null,
+                name:
+                release.label.label_name ??
+                null
+            }
+            : null,
 
             artists:
-                (release.artists || [])
-                    .map(
-                        artist => ({
-                            id:
-                                artist.artist_id ??
-                                null,
-                            name:
-                                artist.artist_name ??
-                                null,
-                            type:
-                                artist.artist_type_name ??
-                                null
-                        })
-                    ),
+            (release.artists || [])
+            .map(
+                artist => ({
+                    id:
+                    artist.artist_id ??
+                    null,
+                    name:
+                    artist.artist_name ??
+                    null,
+                    type:
+                    artist.artist_type_name ??
+                    null
+                })
+            ),
 
             aggregator:
-                release.aggregator
-                    ? {
-                        id:
-                            release.aggregator.aggregator_id ??
-                            null,
-                        name:
-                            release.aggregator.aggregator_name ??
-                            null
-                    }
-                    : null,
+            release.aggregator
+            ? {
+                id:
+                release.aggregator.aggregator_id ??
+                null,
+                name:
+                release.aggregator.aggregator_name ??
+                null
+            }
+            : null,
 
             genres:
-                (release.genre || [])
-                    .map(
-                        genre => ({
-                            id:
-                                genre.genre_id ??
-                                null,
-                            name:
-                                genre.genre_name ??
-                                null
-                        })
-                    ),
+            (release.genre || [])
+            .map(
+                genre => ({
+                    id:
+                    genre.genre_id ??
+                    null,
+                    name:
+                    genre.genre_name ??
+                    null
+                })
+            ),
 
             tracks:
-                (release.tracks || [])
-                    .map(
-                        (track, index) => ({
-                            id:
-                                Number(
-                                    track.track_id ??
-                                    track.id
-                                ),
-                            number:
-                                index + 1,
-                            title:
-                                track.track_name ??
-                                track.name ??
-                                null
-                        })
-                    )
-                    .filter(
-                        track =>
-                            Number.isFinite(
-                                track.id
-                            )
+            (release.tracks || [])
+            .map(
+                (track, index) => ({
+                    id:
+                    Number(
+                        track.track_id ??
+                        track.id
                     ),
+                    number:
+                    index + 1,
+                    title:
+                    track.track_name ??
+                    track.name ??
+                    null
+                })
+            )
+            .filter(
+                track =>
+                Number.isFinite(
+                    track.id
+                )
+            ),
 
             releaseDate: release.release_date ?? null,
             publishDate: release.publish_date ?? null,
@@ -3954,13 +7369,13 @@
             price: release.price ?? null,
 
             releaseUrl:
-                beatportReleaseUrl(
-                    release.release_id,
-                    release.release_name
-                ),
+            beatportReleaseUrl(
+                release.release_id,
+                release.release_name
+            ),
 
             tracklistComplete:
-                false
+            false
         };
     }
 
@@ -4041,7 +7456,7 @@
 
     function normalizeBeatportRelease(release) {
         const shape =
-            beatportReleaseShape(release);
+              beatportReleaseShape(release);
 
         if (
             shape === 'legacy'
@@ -5190,7 +8605,8 @@
                 const name
                 of [
                     'hbr_resolve',
-                    'hbr_release'
+                    'hbr_release',
+                    'hbr_resolve_mode'
                 ]
             ) {
                 if (
@@ -5241,9 +8657,15 @@
                   )
               );
 
-        /*
-     * First visit from Harmony.
-     */
+        const mode =
+              clean(
+                  url.searchParams.get(
+                      'hbr_resolve_mode'
+                  )
+              ) === 'tracks'
+        ? 'tracks'
+        : 'upc';
+
         if (
             id &&
             /^\d+$/.test(
@@ -5255,6 +8677,8 @@
                 id,
 
                 releaseId,
+
+                mode,
 
                 startedAt:
                 Date.now()
@@ -5273,7 +8697,7 @@
         }
 
         /*
-     * Preserve the resolver if Beatport itself causes a same-tab reload.
+     * Preserve the resolver across a Beatport same-tab reload.
      */
         try {
             const stored =
@@ -5299,7 +8723,12 @@
                     releaseId:
                     String(
                         stored.releaseId
-                    )
+                    ),
+
+                    mode:
+                    stored.mode === 'tracks'
+                    ? 'tracks'
+                    : 'upc'
                 };
             }
         } catch {
@@ -5363,7 +8792,11 @@
 
         panel.textContent =
             'Harmony Beatport Recovery: ' +
-            `waiting for UPC from release ${session.releaseId}…`;
+            (
+            session.mode === 'tracks'
+            ? `retrieving full track data for release ${session.releaseId}…`
+            : `waiting for UPC from release ${session.releaseId}…`
+        );
     }
 
     async function refreshBeatportUrlResolver() {
@@ -5376,7 +8809,7 @@
 
         /*
      * The universal Beatport scraper owns this record.
-     * This helper only reads it.
+     * This helper only watches it.
      */
         const record =
               await getCachedRelease(
@@ -5385,7 +8818,56 @@
 
         if (
             urlResolverSession !==
-            session ||
+            session
+        ) {
+            return false;
+        }
+
+        /*
+     * RELEASE ACTIONS MODE
+     *
+     * The exact release is already known. Wait until the universal
+     * scraper upgrades it to Level 2.
+     *
+     * Harmony Release Actions independently watches this exact
+     * cache key, so no response event is necessary.
+     */
+        if (
+            session.mode ===
+            'tracks'
+        ) {
+            if (
+                recordLevel(
+                    record
+                ) < LEVEL.TRACKS
+            ) {
+                return false;
+            }
+
+            console.debug(
+                '[Harmony Beatport Recovery] ' +
+                'Exact-release helper reached Level 2.',
+                {
+                    releaseId:
+                    session.releaseId
+                }
+            );
+
+            clearBeatportUrlResolverSession();
+
+            stripUrlResolverParams();
+
+            window.close();
+
+            return true;
+        }
+
+        /*
+     * URL -> UPC MODE
+     *
+     * Existing behavior.
+     */
+        if (
             !clean(
                 record
                 ?.release
