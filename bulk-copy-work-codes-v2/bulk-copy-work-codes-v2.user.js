@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         MusicBrainz: Bulk copy-paste work codes V2
-// @version      2.0.0
+// @version      2.1.0
 // @description  Copy work identifiers from various online repertoires and paste them into MB works with ease.
 // @author       ROpdebee; modifications by djkhjg
 // @license      MIT; https://opensource.org/licenses/MIT
@@ -2381,7 +2381,7 @@ function handleASCAP() {
 
         if (
             parentNode.matches?.(
-                'article.c-card.songview'
+                'article.c-card'
             )
         ) {
             cards.push(
@@ -2393,7 +2393,7 @@ function handleASCAP() {
             ...(
                 parentNode
                 .querySelectorAll?.(
-                    'article.c-card.songview'
+                    'article.c-card'
                 ) || []
             )
         );
@@ -2419,7 +2419,7 @@ function handleASCAP() {
                           const existingCard =
                                 record.target
                           .closest?.(
-                              'article.c-card.songview'
+                              'article.c-card'
                           );
 
                           if (existingCard) {
@@ -2446,7 +2446,7 @@ function handleASCAP() {
 
                           const containingCard =
                                 node.closest?.(
-                                    'article.c-card.songview'
+                                    'article.c-card'
                                 );
 
                           if (
