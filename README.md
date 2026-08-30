@@ -33,7 +33,7 @@ Original script by ROpdebee
 https://github.com/ROpdebee/mb-userscripts/blob/main/mb_bulk_copy_work_codes.user.js
 
 Adds bug fixes and more providers.  
-[Install](bulk-copy-work-codes-v2/bulk-copy-work-codes-rev2.user.js)
+[Install](bulk-copy-work-codes-v2/bulk-copy-work-codes-v2.user.js)
 
 - Fixes a bug when copy/pasting merged ISWCs from ISWCNet
 - Adds BMI as a provider
