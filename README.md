@@ -5,7 +5,7 @@ Note: All scripts written with the use of LLM ai
 
 ## Scripts
 
-### DJ Mix Tracklist
+### MusicBrainz: DJ Mix Tracklist
 
 Improves the display of DJ-mix relationships on release pages.  
 [Install](dj-mix-tracklist/dj-mix-tracklist.user.js)
@@ -27,3 +27,14 @@ Restores Beatport functionality to Harmony.
 - Passively scrapes Beatport during general browsing. Harmony lookup checks local cache first before running a search to cut down on page loads.
 - Cache size is configurable but default is between 1500-2000 releases. should be at most a couple MB disk-space wise
 - use the console commands HBR.cacheStats() and HBR.listCache() to check on current cache size and contents
+
+### MusicBrainz: Bulk Copy-Paste Work Codes V2
+Original script by ROpdebee  
+https://github.com/ROpdebee/mb-userscripts/blob/main/mb_bulk_copy_work_codes.user.js
+
+Adds bug fixes and more providers.  
+[Install](bulk-copy-work-codes-v2/bulk-copy-work-codes-rev2.user.js)
+
+- Fixes a bug when copy/pasting merged ISWCs from ISWCNet
+- Adds BMI as a provider
+- Adds ASCAP as a provider
