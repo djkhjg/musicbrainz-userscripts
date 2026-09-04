@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Harmony: Beatport Recovery
 // @namespace    https://github.com/djkhjg/musicbrainz-userscripts
-// @version      1.2.0
+// @version      1.3.0
 // @description  Recovers and caches Beatport release and optional track metadata for Harmony.
 // @author       djkhjg
 // @license      MIT
@@ -74,7 +74,7 @@
     };
 
     // constants
-    const HBR_VERSION = '1.2.0';
+    const HBR_VERSION = '1.3.0';
     const HBR_EDIT_NOTE_SUFFIX = `(via Beatport Recovery v${HBR_VERSION})`;
     const HELPER_SESSION_KEY = 'hbr-helper-session-v1';
     const CACHE_LRU_KEY = 'beatport-cache-lru';
@@ -352,8 +352,8 @@
             );
         }
 
-         // Settings only drives initial default for a new
-         // Harmony tab/session.
+        // Settings only drives initial default for a new
+        // Harmony tab/session.
         const enabled =
               getBeatportDefault();
 
@@ -1514,8 +1514,8 @@
             return false;
         }
 
-     // Once we have populated GTIN and rerun Harmony, do not attempt
-     // URL resolution again even if the second lookup also fails.
+        // Once we have populated GTIN and rerun Harmony, do not attempt
+        // URL resolution again even if the second lookup also fails.
         const gtin =
               $('#gtin-input');
 
@@ -1544,8 +1544,8 @@
             return true;
         }
 
-     // Fast path:
-     // the exact Beatport release is already in our cache.
+        // Fast path:
+        // the exact Beatport release is already in our cache.
         const cached =
               await getCachedRelease(
                   releaseId
@@ -1592,8 +1592,8 @@
             return true;
         }
 
-     // Cache miss:
-     // open the exact Beatport release page.
+        // Cache miss:
+        // open the exact Beatport release page.
         const id =
               requestId();
 
@@ -2119,9 +2119,9 @@
                   target.toString()
               );
 
-         // One helper tab owns the whole recovery attempt. If it finds
-         // Level 1 while Level 2 is wanted, that same tab will navigate
-         // itself to the exact release page.
+        // One helper tab owns the whole recovery attempt. If it finds
+        // Level 1 while Level 2 is wanted, that same tab will navigate
+        // itself to the exact release page.
         autoStartedFor =
             `${gtin}|${plan.targetLevel}`;
 
@@ -2153,16 +2153,16 @@
                     return;
                 }
 
-             // Explicit Cancel writes "skipped".
-             // No result at all means the user manually closed the
-             // Beatport helper tab, which is also a skip.
+                // Explicit Cancel writes "skipped".
+                // No result at all means the user manually closed the
+                // Beatport helper tab, which is also a skip.
                 await finishSkippedBeatportLookup(
                     id
                 );
             };
         }
 
-return true;
+        return true;
     }
 
     function recoveryButton({
@@ -2245,10 +2245,10 @@ return true;
             return;
         }
 
-         // Deliberately ignore search/release stage here.
-         // One helper tab is responsible for the entire request. Once
-         // that helper discovers Level 1 it will navigate itself to the
-         // release page when Level 2 is required.
+        // Deliberately ignore search/release stage here.
+        // One helper tab is responsible for the entire request. Once
+        // that helper discovers Level 1 it will navigate itself to the
+        // release page when Level 2 is required.
         const key =
               `${barcode(harmonyBarcode())}|${plan.targetLevel}`;
 
@@ -2782,8 +2782,8 @@ return true;
             icon.id = id;
         }
 
-     // Harmony puts linked provider icons inside an entity-links
-     // group ahead of the displayed value.
+        // Harmony puts linked provider icons inside an entity-links
+        // group ahead of the displayed value.
         const entityLinks =
               $(':scope > .entity-links', cell) ||
               $('.entity-links', cell);
@@ -2839,8 +2839,8 @@ return true;
 
     function harmonyTrackTitle(cell) {
 
-     // Ignore Beatport alternatives that we may already have
-     // inserted into this cell.
+        // Ignore Beatport alternatives that we may already have
+        // inserted into this cell.
         const clone =
               cell.cloneNode(true);
 
@@ -3442,7 +3442,7 @@ return true;
         const labels =
               seedLabels(form);
 
-     // Best case: Harmony already seeded the same label.
+        // Best case: Harmony already seeded the same label.
         const exact =
               labels.find(
                   label =>
@@ -3458,9 +3458,9 @@ return true;
             return exact.index;
         }
 
-     // Harmony omitted the Beatport label:
-     // Don't attach Beatport's catalog number to some unrelated
-     // label. Add Beatport as a new label entry instead.
+        // Harmony omitted the Beatport label:
+        // Don't attach Beatport's catalog number to some unrelated
+        // label. Add Beatport as a new label entry instead.
         const index =
               labels.length
         ? Math.max(
@@ -3501,8 +3501,8 @@ return true;
             return;
         }
 
-     // The label itself is worth seeding even when Beatport has no
-     // catalog number.
+        // The label itself is worth seeding even when Beatport has no
+        // catalog number.
         if (!release.catalogNumber) {
             return;
         }
@@ -3752,7 +3752,7 @@ return true;
         );
 
         ensureEditNote(
-    form,
+            form,
             release
         );
 
@@ -4128,15 +4128,15 @@ return true;
         ) {
             return;
         }
-            suppressBeatportFailureMessage();
+        suppressBeatportFailureMessage();
 
         const upc =
               barcode(
                   harmonyBarcode()
               );
 
-     // HBR does not make any provider-recovery decision until
-     // MPL has either finished or is not participating.
+        // HBR does not make any provider-recovery decision until
+        // MPL has either finished or is not participating.
         if (!mplAllowsHbr()) {
             scheduleMplBeatportRecheck();
 
@@ -4194,9 +4194,9 @@ return true;
             return;
         }
 
-     // From this point onward Harmony never performs another
-     // Beatport lookup. It simply watches the UPC pointer and,
-     // once known, that release's cache record.
+        // From this point onward Harmony never performs another
+        // Beatport lookup. It simply watches the UPC pointer and,
+        // once known, that release's cache record.
         await ensureHarmonyCacheWatch(
             upc
         );
@@ -4233,9 +4233,9 @@ return true;
             const want =
                   desiredLevel();
 
-         // The requested Beatport data is now present on this same
-         // Harmony page. Any HBR helper that produced it has finished,
-         // so release the next provider in the chain.
+            // The requested Beatport data is now present on this same
+            // Harmony page. Any HBR helper that produced it has finished,
+            // so release the next provider in the chain.
             if (
                 have >= want
             ) {
@@ -4247,9 +4247,9 @@ return true;
                 'busy'
             ) {
 
-             // Missing data remains, but HBR is not automatically
-             // retrieving it. For example Auto may be disabled and
-             // the user has only been offered a manual button.
+                // Missing data remains, but HBR is not automatically
+                // retrieving it. For example Auto may be disabled and
+                // the user has only been offered a manual button.
                 setHbrFlowStatus(
                     'finished'
                 );
@@ -5272,7 +5272,7 @@ return true;
                     '.action-group'
                 );
 
-         // put HBR recording actions into action group for the click-all button
+            // put HBR recording actions into action group for the click-all button
             if (!group) {
                 group =
                     el(
@@ -6485,9 +6485,9 @@ return true;
         const results =
               {};
 
-     // Keep these sequential so we continue respecting the
-     // MusicBrainz request spacing already enforced by
-     // musicBrainzJson().
+        // Keep these sequential so we continue respecting the
+        // MusicBrainz request spacing already enforced by
+        // musicBrainzJson().
         for (
             const type
             of types
@@ -7571,11 +7571,11 @@ return true;
             return;
         }
 
-         // If HBR itself caused the previous automatic Harmony
-         // navigation/reload, consume that busy state now.
-         //
-         // This releases the next provider in the chain while also
-         // suppressing another automatic HBR lookup on this load.
+        // If HBR itself caused the previous automatic Harmony
+        // navigation/reload, consume that busy state now.
+        //
+        // This releases the next provider in the chain while also
+        // suppressing another automatic HBR lookup on this load.
         suppressHbrLookupThisLoad =
             consumeHbrReturnLoad();
 
@@ -7775,15 +7775,6 @@ return true;
 
     //release objects found on Artist page, recommendeds, and the full release page itself
     function normalizeV4Release(release) {
-        const trackUrls =
-              Array.isArray(release.tracks)
-        ? release.tracks.filter(
-            value =>
-            typeof value === 'string' &&
-            value.includes('/catalog/tracks/')
-        )
-        : [];
-
         return {
             releaseId: release.id,
             releaseName: release.name,
@@ -7801,13 +7792,6 @@ return true;
                 id: artist.id ?? null,
                 name: artist.name ?? null
             })),
-
-            // Only full/rich v4 release objects normally contain this.
-            // Keep Beatport's raw order here. It is reversed later when
-            // assembling Level 2.
-            ...(trackUrls.length
-                ? { trackUrls }
-                : {}),
 
             releaseDate:
             release.new_release_date ??
@@ -7949,25 +7933,12 @@ return true;
             return incoming;
         }
 
-        const merged =
-              mergeRelease(
-                  existing,
-                  incoming,
-                  LEVEL.RELEASE,
-                  LEVEL.RELEASE
-              );
-
-        // Never let a sparse release observation erase a richer
-        // full-release track URL list.
-        if (
-            (existing.trackUrls?.length || 0) >
-            (incoming.trackUrls?.length || 0)
-        ) {
-            merged.trackUrls =
-                existing.trackUrls;
-        }
-
-        return merged;
+        return mergeRelease(
+            existing,
+            incoming,
+            LEVEL.RELEASE,
+            LEVEL.RELEASE
+        );
     }
 
     // Embedded React Query representation:
@@ -8155,7 +8126,7 @@ return true;
                     return;
                 }
 
-             // Existing Level-1 release recognition.
+                // Existing Level-1 release recognition.
                 const release =
                       normalizeBeatportRelease(
                           value
@@ -8167,7 +8138,7 @@ return true;
                     );
                 }
 
-             // Embedded rich track query recognition.
+                // Embedded rich track query recognition.
                 const tracklist =
                       beatportTracklistQuery(
                           value
@@ -8214,6 +8185,9 @@ return true;
                 richTracks:
                 [],
 
+                orderedTrackIds:
+                [],
+
                 level2Complete:
                 false
             };
@@ -8227,34 +8201,247 @@ return true;
         return assembly;
     }
 
-    function beatportTrackIdFromUrl(url) {
-        const match =
-              String(url || '')
-        .match(
-            /\/tracks\/(\d+)\/?(?:\?.*)?$/
-        );
-
-        if (!match) {
-            return null;
+    function beatportDomTrackOrder(releaseId) {
+        if (
+            String(
+                currentBeatportReleaseId()
+            ) !==
+            String(
+                releaseId
+            )
+        ) {
+            return [];
         }
 
-        const id =
-              Number(match[1]);
+        const tracks =
+              [];
 
-        return Number.isFinite(id)
-            ? id
-        : null;
+        const seen =
+              new Set();
+
+        // Beatport has two responsive tracklist renderers:
+        //
+        //   tile/card view:
+        //     [data-testid="tracks-list-item"]
+        //
+        //   table/list view:
+        //     [data-testid="tracks-table-row"]
+        //
+        // Both preserve the authoritative visible release order and
+        // both contain the canonical /track/<slug>/<id> link.
+        const rows =
+              $$(
+                  [
+                      '[data-testid="tracks-list-item"]',
+                      '[data-testid="tracks-table-row"]'
+                  ].join(',')
+              );
+
+        for (
+            const row
+            of rows
+        ) {
+            const trackLink =
+                  $('a[href*="/track/"]', row);
+
+            if (!trackLink) {
+                continue;
+            }
+
+            const href =
+                  trackLink.getAttribute(
+                      'href'
+                  ) ||
+                  '';
+
+            const match =
+                  href.match(
+                      /\/track\/[^/]+\/(\d+)/
+                  );
+
+            if (!match) {
+                continue;
+            }
+
+            const id =
+                  Number(
+                      match[1]
+                  );
+
+            if (
+                !Number.isFinite(id) ||
+                seen.has(id)
+            ) {
+                continue;
+            }
+
+            seen.add(id);
+
+            tracks.push({
+                id,
+
+                number:
+                tracks.length + 1,
+
+                title:
+                clean(
+                    trackLink.getAttribute(
+                        'title'
+                    ) ||
+                    trackLink.textContent
+                ) ||
+                null
+            });
+        }
+
+        return tracks;
     }
 
-    // Beatport's release.tracks URL array is stored in reverse release
-    // order. Reverse it, then use those URLs to arrange the rich track objects.
-    function buildLevel2Release(release, richTracks) {
+    function setupBeatportDomTrackOrderWatch() {
+        const releaseId =
+              currentBeatportReleaseId();
+
+        if (!releaseId) {
+            return;
+        }
+
+        const assembly =
+              assemblyForRelease(
+                  releaseId
+              );
+
+        let running =
+            false;
+
+        const capture =
+              async () => {
+                  if (
+                      running ||
+                      assembly.level2Complete
+                  ) {
+                      return;
+                  }
+
+                  running =
+                      true;
+
+                  try {
+                      const orderedTracks =
+                            beatportDomTrackOrder(
+                                releaseId
+                            );
+
+                      if (!orderedTracks.length) {
+                          return;
+                      }
+
+                      const expectedCount =
+                            Number(
+                                assembly.release
+                                ?.trackCount
+                            );
+
+                   // If release metadata already tells us the expected
+                   // size, do not save a partially rendered DOM list.
+                      if (
+                          Number.isFinite(
+                              expectedCount
+                          ) &&
+                          expectedCount > 0 &&
+                          orderedTracks.length !==
+                          expectedCount
+                      ) {
+                          return;
+                      }
+
+                      const orderedTrackIds =
+                            orderedTracks.map(
+                                track =>
+                                track.id
+                            );
+
+                      const unchanged =
+                            orderedTrackIds.length ===
+                            assembly.orderedTrackIds.length &&
+                            orderedTrackIds.every(
+                                (id, index) =>
+                                id ===
+                                assembly.orderedTrackIds[index]
+                            );
+
+                      if (!unchanged) {
+                          assembly.orderedTrackIds =
+                              orderedTrackIds;
+
+                          if (
+                              DEBUG_FOUND_RELEASES
+                          ) {
+                              console.debug(
+                                  '[Harmony Beatport Recovery] ' +
+                                  'Captured Beatport DOM track order.',
+                                  {
+                                      releaseId,
+                                      orderedTrackIds
+                                  }
+                              );
+                          }
+                      }
+
+                      await tryAssembleLevel2(
+                          releaseId
+                      );
+
+                      if (
+                          assembly.level2Complete
+                      ) {
+                          observer.disconnect();
+                      }
+                  } catch (error) {
+                      console.warn(
+                          '[Harmony Beatport Recovery] ' +
+                          'Could not capture Beatport track order.',
+                          error
+                      );
+                  } finally {
+                      running =
+                          false;
+                  }
+              };
+
+        const observer =
+              new MutationObserver(
+                  () => {
+                      capture();
+                  }
+              );
+
+        observer.observe(
+            document.body,
+            {
+                childList:
+                true,
+
+                subtree:
+                true
+            }
+        );
+
+     // The tracklist may already be rendered before the observer
+     // is installed.
+        capture();
+    }
+
+    function buildLevel2Release(release, richTracks, orderedTrackIds) {
         if (
             !release?.releaseId ||
-            !Array.isArray(release.trackUrls) ||
-            !release.trackUrls.length ||
-            !Array.isArray(richTracks) ||
-            !richTracks.length
+            !Array.isArray(
+                richTracks
+            ) ||
+            !richTracks.length ||
+            !Array.isArray(
+                orderedTrackIds
+            ) ||
+            !orderedTrackIds.length
         ) {
             return null;
         }
@@ -8265,18 +8452,18 @@ return true;
               );
 
         if (
-            Number.isFinite(expectedCount) &&
+            Number.isFinite(
+                expectedCount
+            ) &&
             expectedCount > 0
         ) {
             if (
-                release.trackUrls.length !==
+                orderedTrackIds.length !==
                 expectedCount
             ) {
                 return null;
             }
 
-         // Rich tracks may arrive over more than one paginated
-         // response, so only reject if we have too few.
             if (
                 richTracks.length <
                 expectedCount
@@ -8285,14 +8472,6 @@ return true;
             }
         }
 
-        const orderedUrls =
-              release.trackUrls
-        .slice()
-        .reverse();
-
-        const tracksByUrl =
-              new Map();
-
         const tracksById =
               new Map();
 
@@ -8300,51 +8479,38 @@ return true;
             const track
             of richTracks
         ) {
-            if (track.url) {
-                tracksByUrl.set(
-                    track.url,
-                    track
-                );
-            }
+            const id =
+                  Number(
+                      track?.id
+                  );
 
             if (
-                Number.isFinite(
-                    Number(track.id)
-                )
+                Number.isFinite(id)
             ) {
                 tracksById.set(
-                    Number(track.id),
+                    id,
                     track
                 );
             }
         }
 
-        const tracks = [];
+        const tracks =
+              [];
 
         for (
             let index = 0;
-            index < orderedUrls.length;
+            index <
+            orderedTrackIds.length;
             index++
         ) {
-            const url =
-                  orderedUrls[index];
-
-         // Exact URL matching is Harmony's original strategy.
-         // ID matching is a harmless fallback in case Beatport
-         // changes API hostnames while keeping the same track IDs.
-            const orderedId =
-                  beatportTrackIdFromUrl(
-                      url
+            const id =
+                  Number(
+                      orderedTrackIds[index]
                   );
 
             const track =
-                  tracksByUrl.get(url) ||
-                  (
-                      orderedId != null
-                      ? tracksById.get(
-                          orderedId
-                      )
-                      : null
+                  tracksById.get(
+                      id
                   );
 
             if (!track) {
@@ -8353,24 +8519,20 @@ return true;
 
             tracks.push({
                 ...track,
+
                 number:
                 index + 1,
+
                 metadataFound:
                 true
             });
         }
 
-        if (
-            Number.isFinite(expectedCount) &&
-            expectedCount > 0 &&
-            tracks.length !== expectedCount
-        ) {
-            return null;
-        }
-
         return {
             ...release,
+
             tracks,
+
             tracklistComplete:
             true
         };
@@ -8388,47 +8550,17 @@ return true;
             return null;
         }
 
-     // The persistent cache is authoritative.
+     // Level 2 consists of three independently discovered pieces:
      //
-     // If this release is already Level 2, there is nothing
-     // for the assembler to rebuild. Any Level-1 metadata
-     // observed immediately beforehand has already been merged
-     // into that Level-2 cache record by cacheReleaseBatch().
-        const cached =
-              await getCachedRelease(
-                  releaseId
-              );
-
-        if (
-            cached &&
-            recordLevel(cached) >=
-            LEVEL.TRACKS
-        ) {
-            assembly.level2Complete =
-                true;
-
-         // Keep the in-memory assembly synchronized with the
-         // canonical cached release in case anything else in
-         // this page session refers to it.
-            assembly.release =
-                cached.release;
-
-            return cached;
-        }
-
-     // If the track query arrived before the release object,
-     // a cached Level-1 record can supply the release half.
-        if (
-            !assembly.release &&
-            cached?.release
-        ) {
-            assembly.release =
-                cached.release;
-        }
-
+     //   release metadata
+     //   rich track metadata
+     //   rendered Beatport track order
+     //
+     // Arrival order does not matter.
         if (
             !assembly.release ||
-            !assembly.richTracks.length
+            !assembly.richTracks.length ||
+            !assembly.orderedTrackIds.length
         ) {
             return null;
         }
@@ -8436,7 +8568,8 @@ return true;
         const level2 =
               buildLevel2Release(
                   assembly.release,
-                  assembly.richTracks
+                  assembly.richTracks,
+                  assembly.orderedTrackIds
               );
 
         if (!level2) {
@@ -8449,9 +8582,40 @@ return true;
                   LEVEL.TRACKS
               );
 
-        if (record) {
+        if (
+            recordLevel(
+                record
+            ) >=
+            LEVEL.TRACKS
+        ) {
             assembly.level2Complete =
                 true;
+
+            if (
+                DEBUG_CACHED_RELEASES
+            ) {
+                console.debug(
+                    '[Harmony Beatport Recovery] ' +
+                    'Beatport release upgraded to Level 2.',
+                    {
+                        releaseId:
+                        String(
+                            releaseId
+                        ),
+
+                        tracks:
+                        level2.tracks.length,
+
+                        isrcs:
+                        level2.tracks.filter(
+                            track =>
+                            clean(
+                                track.isrc
+                            )
+                        ).length
+                    }
+                );
+            }
         }
 
         return record;
@@ -8584,8 +8748,8 @@ return true;
             );
         }
 
-     // Every recognized release still enters the normal Level-1
-     // cache exactly as before.
+        // Every recognized release still enters the normal Level-1
+        // cache exactly as before.
         if (releases.size) {
             await cacheReleaseBatch(
                 [...releases.values()],
@@ -8593,8 +8757,8 @@ return true;
             );
         }
 
-     // Any touched release may now have both halves required
-     // for Level 2.
+        // Any touched release may now have both halves required
+        // for Level 2.
         for (
             const releaseId
             of touchedReleaseIds
@@ -9168,8 +9332,8 @@ return true;
             return false;
         }
 
-     // The universal Beatport scraper owns this record.
-     // This helper only watches it.
+        // The universal Beatport scraper owns this record.
+        // This helper only watches it.
         const record =
               await getCachedRelease(
                   session.releaseId
@@ -9854,9 +10018,9 @@ return true;
             )
         );
 
-     // Do an initial read as well as listening for future changes.
-     // This handles a UPC that the universal scraper cached before
-     // the helper listener finished initializing.
+        // Do an initial read as well as listening for future changes.
+        // This handles a UPC that the universal scraper cached before
+        // the helper listener finished initializing.
         await refreshBeatportHelper();
     }
 
@@ -9866,6 +10030,11 @@ return true;
 
     async function processBeatport() {
         await ingestEmbeddedBeatportData();
+
+     // Rich JSON may be available before React has rendered the
+     // release track rows. The DOM supplies authoritative track
+     // ordering, so retry Level-2 assembly when those rows appear.
+        setupBeatportDomTrackOrderWatch();
 
         if (
             await initBeatportUrlResolver()
