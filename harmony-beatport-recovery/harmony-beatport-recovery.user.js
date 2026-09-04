@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Harmony: Beatport Recovery
 // @namespace    https://github.com/djkhjg/musicbrainz-userscripts
-// @version      1.1.0
+// @version      1.2.0
 // @description  Recovers and caches Beatport release and optional track metadata for Harmony.
 // @author       djkhjg
 // @license      MIT
@@ -10,7 +10,9 @@
 // @downloadURL  https://raw.github.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
 // @updateURL    https://raw.github.com/djkhjg/musicbrainz-userscripts/main/harmony-beatport-recovery/harmony-beatport-recovery.user.js
 // @match        https://harmony.pulsewidth.org.uk/release*
+// @match        https://harmony.pulsewidth.org.uk/settings*
 // @match        https://harmony.mybrainz.dev/release*
+// @match        https://harmony.mybrainz.dev/settings*
 // @match        https://www.beatport.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -30,7 +32,7 @@
     const DEBUG_FOUND_RELEASES = false;
     const DEBUG_CACHED_RELEASES = false;
     const DEBUG_CACHE_PRUNING = true;
-    const DEBUG_RELEASE_ACTIONS = true;
+    const DEBUG_RELEASE_ACTIONS = false;
 
     // Console commands for debug:
     // HBR.clearCache() -> clear entire cache
@@ -72,6 +74,8 @@
     };
 
     // constants
+    const HBR_VERSION = '1.2.0';
+    const HBR_EDIT_NOTE_SUFFIX = `(via Beatport Recovery v${HBR_VERSION})`;
     const HELPER_SESSION_KEY = 'hbr-helper-session-v1';
     const CACHE_LRU_KEY = 'beatport-cache-lru';
     const CACHE_PREFIX = 'beatport-release-';
@@ -82,6 +86,10 @@
     const HARMONY_CLEAR_RESOLVED_UPC_KEY = 'hbr-clear-resolved-upc-v1';
     const URL_RESULT_PREFIX = 'hbr-url-result-';
     const UNKNOWN_UPC = '[unknown]';
+    const HBR_BEATPORT_DEFAULT_KEY ='hbr-beatport-default-v1';
+    const HBR_PROVIDER_SELECTION_KEY ='hbr-provider-selection-v1';
+    const HBR_MESSAGE_ID ='hbr-beatport-message';
+    const HELPER_RESULT_PREFIX = 'hbr-helper-result-';
 
     const TRACK_SETTING_KEY = 'hbr-setting-track-data';
     const AUTO_SETTING_KEY = 'hbr-setting-auto';
@@ -115,6 +123,9 @@
     let passiveCacheQueue = Promise.resolve();
     const beatportAssembly = new Map();
 
+    const MPL_FLOW_STATUS_KEY = 'harmony-provider-flow:mpl';
+    const HBR_FLOW_STATUS_KEY = 'harmony-provider-flow:hbr';
+
     // runtime states
     let activeRecord = null;
     let watchedUPC = '';
@@ -129,6 +140,7 @@
     let harmonyCheckScheduled = false;
     let uiApplying = false;
     let autoStartedFor = null;
+    let beatportRequestedForThisLookup = null;
 
     let helperSession = null;
     let helperUPCListener = null;
@@ -138,6 +150,8 @@
 
     let urlResolverSession = null;
     let urlResolverReleaseListener = null;
+    let mplRetryTimer = null;
+    let suppressHbrLookupThisLoad = false;
 
     // -------------------------------------------------------------------------
     // Helpers
@@ -168,12 +182,11 @@
         'harmony.pulsewidth.org.uk',
         'harmony.mybrainz.dev'
     ].includes(location.hostname);
-
-    const isHarmonyReleaseActions = () =>
-    isHarmony() &&
-          location.pathname === '/release/actions';
-
+    const isHarmonyReleaseActions = () => isHarmony() && location.pathname === '/release/actions';
+    const isHarmonySettings = () => isHarmony() && location.pathname === '/settings';
     const isBeatport = () => location.hostname === 'www.beatport.com';
+
+    const helperResultKey = requestId => `${HELPER_RESULT_PREFIX}${requestId}`;
 
     function requestId() {
         return crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -206,6 +219,65 @@
             title: 'Beatport',
             html: `<svg class="icon" width="${size}" height="${size}" stroke-width="${stroke}"><use xlink:href="/icon-sprite.svg#brand-beatport"></use></svg>`
         });
+    }
+
+    function setHbrFlowStatus(status) {
+        sessionStorage.setItem(
+            HBR_FLOW_STATUS_KEY,
+            status
+        );
+    }
+
+    function getHbrFlowStatus() {
+        return sessionStorage.getItem(
+            HBR_FLOW_STATUS_KEY
+        );
+    }
+
+    function mplAllowsHbr() {
+        // wait for MPL if it is installed
+        const status =
+              sessionStorage.getItem(
+                  MPL_FLOW_STATUS_KEY
+              );
+
+        return (
+            status === null ||
+            status === 'finished'
+        );
+    }
+
+    function consumeHbrReturnLoad() {
+        // Checks if HBR loaded the page (generally by URL->UPC entry)
+        if (
+            getHbrFlowStatus() !==
+            'busy'
+        ) {
+            return false;
+        }
+
+        setHbrFlowStatus(
+            'finished'
+        );
+
+        return true;
+    }
+
+    function scheduleMplBeatportRecheck() {
+        if (mplRetryTimer != null) {
+            return;
+        }
+
+        mplRetryTimer =
+            setTimeout(
+            () => {
+                mplRetryTimer =
+                    null;
+
+                scheduleHarmonyCheck();
+            },
+            250
+        );
     }
 
     function hidden(form, name, value) {
@@ -245,6 +317,240 @@
             '[Harmony Beatport Recovery] [Release Actions]',
             ...args
         );
+    }
+
+    // =========================================================================
+    // Settings Page
+    // =========================================================================
+
+    function getBeatportDefault() {
+        return (
+            localStorage.getItem(
+                HBR_BEATPORT_DEFAULT_KEY
+            ) === '1'
+        );
+    }
+
+    function setBeatportDefault(enabled) {
+        localStorage.setItem(
+            HBR_BEATPORT_DEFAULT_KEY,
+            enabled
+            ? '1'
+            : '0'
+        );
+    }
+
+    function getBeatportSelection() {
+        const stored =
+              sessionStorage.getItem(
+                  HBR_PROVIDER_SELECTION_KEY
+              );
+
+        if (stored !== null) {
+            return (
+                stored === '1'
+            );
+        }
+
+         // Settings only drives initial default for a new
+         // Harmony tab/session.
+        const enabled =
+              getBeatportDefault();
+
+        sessionStorage.setItem(
+            HBR_PROVIDER_SELECTION_KEY,
+            enabled
+            ? '1'
+            : '0'
+        );
+
+        return enabled;
+    }
+
+    function setBeatportSelection(enabled) {
+        sessionStorage.setItem(
+            HBR_PROVIDER_SELECTION_KEY,
+            enabled
+            ? '1'
+            : '0'
+        );
+    }
+
+    function initHarmonySettings() {
+        if (
+            replaceHarmonyBeatportCheckbox(
+                'settings'
+            )
+        ) {
+            return;
+        }
+
+        const observer =
+              new MutationObserver(
+                  () => {
+                      if (
+                          replaceHarmonyBeatportCheckbox(
+                              'settings'
+                          )
+                      ) {
+                          observer.disconnect();
+                      }
+                  }
+              );
+
+        observer.observe(
+            document.documentElement,
+            {
+                childList: true,
+                subtree: true
+            }
+        );
+    }
+
+    // =========================================================================
+    // Beatport Checkbox
+    // =========================================================================
+
+    function getHbrBeatportCheckbox(mode) {
+        return $(
+            `#hbr-${mode}-beatport-input`
+        );
+    }
+
+    function replaceHarmonyBeatportCheckbox(mode) {
+        const existing =
+              getHbrBeatportCheckbox(
+                  mode
+              );
+
+        if (existing) {
+            return existing;
+        }
+
+        const nativeCheckbox =
+              $('#beatport-input');
+
+        if (!nativeCheckbox) {
+            return null;
+        }
+
+        // Copy Harmony's visual checkbox but not its behavior.
+        // Most importantly, this replacement has no `name`, so
+        // submitting Harmony's form can never create &beatport=.
+        const checkbox =
+              nativeCheckbox.cloneNode(
+                  false
+              );
+
+        checkbox.id =
+            `hbr-${mode}-beatport-input`;
+
+        checkbox.removeAttribute(
+            'name'
+        );
+
+        checkbox.removeAttribute(
+            'value'
+        );
+
+        checkbox.disabled =
+            false;
+
+        if (
+            mode ===
+            'settings'
+        ) {
+            checkbox.checked =
+                getBeatportDefault();
+        } else {
+            checkbox.checked =
+                getBeatportSelection();
+        }
+
+        const label =
+              nativeCheckbox.closest(
+                  '.provider-input'
+              );
+
+        const oldId =
+              nativeCheckbox.id;
+
+        nativeCheckbox.replaceWith(
+            checkbox
+        );
+
+        if (label) {
+            if (
+                label.getAttribute(
+                    'for'
+                ) === oldId
+            ) {
+                label.setAttribute(
+                    'for',
+                    checkbox.id
+                );
+            }
+
+            label.title =
+                mode === 'settings'
+                ? 'Beatport default managed by Harmony Beatport Recovery'
+            : 'Beatport session selection managed by Harmony Beatport Recovery';
+        }
+
+        checkbox.addEventListener(
+            'change',
+            () => {
+                if (
+                    mode ===
+                    'settings'
+                ) {
+                    setBeatportDefault(
+                        checkbox.checked
+                    );
+
+                    return;
+                }
+
+                setBeatportSelection(
+                    checkbox.checked
+                );
+            }
+        );
+
+        return checkbox;
+    }
+
+    function ensureBeatportSelectionSnapshot() {
+        const checkbox =
+              setupBeatportCheckbox();
+
+        if (!checkbox) {
+            return false;
+        }
+
+        if (
+            beatportRequestedForThisLookup ===
+            null
+        ) {
+            beatportRequestedForThisLookup =
+                Boolean(
+                checkbox.checked ||
+                beatportReleaseIdFromUrl(
+                    $('#url-input')?.value
+                )
+            );
+
+            console.info(
+                '[Harmony Beatport Recovery]',
+                `Beatport requested for this lookup: ${
+                beatportRequestedForThisLookup
+                ? 'yes'
+                : 'no'
+                }`
+            );
+        }
+
+        return true;
     }
 
     // =========================================================================
@@ -341,7 +647,10 @@
         };
     }
 
-    // debug functions
+    // =========================================================================
+    // Debug functions
+    // =========================================================================
+
     async function clearEntireCache() {
         const keys =
               await GM_listValues();
@@ -709,9 +1018,9 @@
             });
 
             /*
-         * The release record owns the UPC relationship,
-         * so read it before deleting the release.
-         */
+             * The release record owns the UPC relationship,
+             * so read it before deleting the release.
+             */
             await GM_deleteValue(
                 cacheKey(
                     releaseId
@@ -935,6 +1244,7 @@
     // =========================================================================
 
     function beatportReleaseIdFromUrl(value) {
+        //extract ID from the entered URL
         try {
             const url =
                   new URL(
@@ -964,6 +1274,7 @@
     }
 
     function noProviderReturnedRelease() {
+        // make sure Harmony failed
         return $$('.message.error')
             .some(
             message =>
@@ -990,7 +1301,7 @@
 
     function showBeatportUpcRetryStatus(upc) {
         const message =
-              beatportFailureMessage();
+              ensureBeatportMessage();
 
         if (!message) {
             return;
@@ -1011,7 +1322,7 @@
                     'strong',
                     {
                         text:
-                        'Beatport provider offline — '
+                        'Beatport URL recovery — '
                     }
                 ),
                 `retrying lookup by UPC ${clean(upc)}…`
@@ -1020,8 +1331,9 @@
     }
 
     function showBeatportNoUpcStatus(releaseId, releaseUrl) {
+        // in case release has no UPC at all
         const message =
-              beatportFailureMessage();
+              ensureBeatportMessage();
 
         if (!message) {
             return;
@@ -1040,7 +1352,7 @@
                     'strong',
                     {
                         text:
-                        'Beatport provider offline'
+                        'Beatport URL recovery'
                     }
                 )
             ),
@@ -1085,6 +1397,7 @@
     }
 
     function submitHarmonyWithResolvedUpc(upc) {
+        // Auto submit entered UPC
         const form =
               $('#url-input')
         ?.closest('form');
@@ -1103,9 +1416,6 @@
         gtin.value =
             clean(upc);
 
-        /*
-     * Notify Harmony and any other userscripts that the field changed.
-     */
         gtin.dispatchEvent(
             new Event(
                 'input',
@@ -1133,11 +1443,6 @@
             }
         );
 
-        /*
-     * Harmony may take a while to complete the second lookup.
-     * Replace the dead-provider error with an explanation of what
-     * the recovery script is doing in the meantime.
-     */
         showBeatportUpcRetryStatus(
             upc
         );
@@ -1147,12 +1452,17 @@
             '1'
         );
 
+        setHbrFlowStatus(
+            'busy'
+        );
+
         form.requestSubmit();
 
         return true;
     }
 
     function clearResolvedUrlUpcField() {
+        // clears temporary UPC field to match Harmony native URL-only lookup
         if (
             sessionStorage.getItem(
                 HARMONY_CLEAR_RESOLVED_UPC_KEY
@@ -1194,22 +1504,18 @@
     }
 
     async function resolveFailedBeatportUrlLookup() {
-        // This feature is deliberately post-failure only.
-        // Until Harmony's native Beatport provider has actually failed,
-        // this code does absolutely nothing.
+        // This feature is deliberately post-Harmony-failure only.
+        // If an explicit Beatport URL did not produce a Harmony release,
+        // use the exact Beatport release to discover a UPC and retry the
+        // normal Harmony lookup.
         if (
-            !beatportFailureMessage() ||
             !noProviderReturnedRelease()
         ) {
             return false;
         }
 
-        /*
-     * This is specifically for URL-only lookups.
-     *
-     * Once we have populated GTIN and rerun Harmony, do not attempt
-     * URL resolution again even if the second lookup also fails.
-     */
+     // Once we have populated GTIN and rerun Harmony, do not attempt
+     // URL resolution again even if the second lookup also fails.
         const gtin =
               $('#gtin-input');
 
@@ -1234,17 +1540,12 @@
             return false;
         }
 
-        /*
-     * Already resolving this failed URL.
-     */
         if (harmonyUrlResolve) {
             return true;
         }
 
-        /*
-     * Fast path:
-     * the exact Beatport release is already in our cache.
-     */
+     // Fast path:
+     // the exact Beatport release is already in our cache.
         const cached =
               await getCachedRelease(
                   releaseId
@@ -1266,13 +1567,17 @@
                 cached.release.releaseUrl
             );
 
+            setHbrFlowStatus(
+                'finished'
+            );
+
             return true;
         }
 
         if (cachedUpc) {
             console.debug(
                 '[Harmony Beatport Recovery] ' +
-                'Failed native Beatport URL lookup resolved from cache.',
+                'Beatport URL lookup resolved from cache.',
                 {
                     releaseId,
                     upc:
@@ -1286,13 +1591,9 @@
 
             return true;
         }
-        /*
-     * Cache miss:
-     * open the exact Beatport release page.
-     *
-     * The universal scraper owns all parsing/cache writes.
-     * Harmony only waits for that release record to acquire a UPC.
-     */
+
+     // Cache miss:
+     // open the exact Beatport release page.
         const id =
               requestId();
 
@@ -1348,7 +1649,7 @@
 
                 console.debug(
                     '[Harmony Beatport Recovery] ' +
-                    'Failed native Beatport URL lookup resolved by Beatport helper.',
+                    'Beatport URL lookup resolved by Beatport helper.',
                     result
                 );
 
@@ -1371,6 +1672,10 @@
                         releaseId,
                         record?.release?.releaseUrl ||
                         beatportUrl
+                    );
+
+                    setHbrFlowStatus(
+                        'finished'
                     );
 
                     return;
@@ -1410,6 +1715,10 @@
             }
         );
 
+        setHbrFlowStatus(
+            'busy'
+        );
+
         openBeatport(
             target.toString()
         );
@@ -1421,8 +1730,10 @@
     // Harmony release identity / settings
     // =========================================================================
 
+    // Harmony's canonical merged release title
     const releaseTitle = () => clean($('.release-title')?.textContent);
 
+    // Harmony's canonical merged artist name
     function releaseArtist() {
         const container = $('.release-artist');
 
@@ -1434,6 +1745,7 @@
         );
     }
 
+    // Barcode rendered in Harmony's release table
     function harmonyBarcode() {
         for (const row of $$('.release-info tr')) {
             if (
@@ -1450,8 +1762,9 @@
         return '';
     }
 
-    const beatportEnabled = () => Boolean($('#beatport-input')?.checked);
+    const beatportEnabled = () => beatportRequestedForThisLookup === true;
 
+    // Builds the backup artist+title search
     function searchUrl() {
         const query = [
             releaseTitle(),
@@ -1465,18 +1778,10 @@
         : null;
     }
 
+    // track data & auto settings
     async function loadSettings() {
         settings.trackData = await GM_getValue(TRACK_SETTING_KEY, true);
         settings.auto = await GM_getValue(AUTO_SETTING_KEY, false);
-    }
-
-    async function clearTransientState() {
-        stopHarmonyCacheWatch();
-
-        activeRecord = null;
-        uiAppliedRecordStamp = '';
-        controlsReadyUPC = '';
-        autoStartedFor = null;
     }
 
     function currentRecord() {
@@ -1538,41 +1843,10 @@
     }
 
     function setupBeatportCheckbox() {
-        const checkbox = $('#beatport-input');
-
-        if (
-            !checkbox ||
-            checkbox.dataset.hbrListener
-        ) {
-            return;
-        }
-
-        checkbox.dataset.hbrListener = '1';
-
-        checkbox.addEventListener(
-            'change',
-            async () => {
-                if (!checkbox.checked) {
-                    await clearTransientState();
-                    return;
-                }
-
-                activeRecord = null;
-                uiAppliedRecordStamp = '';
-                controlsReadyUPC = '';
-                autoStartedFor = null;
-
-                scheduleHarmonyCheck();
-            }
-        );
-    }
-
-    function beatportMessage() {
-        return $$('.message').find(
-            message =>
-            clean($('.provider', message)?.textContent)
-            .replace(/:$/, '')
-            .toLowerCase() === 'beatport'
+        return (
+            replaceHarmonyBeatportCheckbox(
+                'lookup'
+            )
         );
     }
 
@@ -1580,28 +1854,6 @@
     $('.provider', message)?.nextElementSibling ||
           message.lastElementChild ||
           message;
-
-    function beatportFailureMessage() {
-        return $$('.message.error').find(
-            message => {
-                const provider = clean(
-                    $('.provider', message)?.textContent
-                )
-                .replace(/:$/, '')
-                .toLowerCase();
-
-                if (provider !== 'beatport') {
-                    return false;
-                }
-
-                return clean(
-                    messageContent(message)?.textContent
-                ).startsWith(
-                    'Failed to extract embedded JSON'
-                );
-            }
-        );
-    }
 
     // =========================================================================
     // Harmony settings / controls
@@ -1759,9 +2011,10 @@
     function openBeatport(url) {
         try {
             if (
-                typeof GM_openInTab === 'function'
+                typeof GM_openInTab ===
+                'function'
             ) {
-                GM_openInTab(
+                return GM_openInTab(
                     url,
                     {
                         active: true,
@@ -1769,14 +2022,15 @@
                         setParent: true
                     }
                 );
-
-                return;
             }
         } catch {
             // Fall through.
         }
 
-        window.open(url, '_blank');
+        return window.open(
+            url,
+            '_blank'
+        );
     }
 
     async function startLookup(_button = null) {
@@ -1800,10 +2054,8 @@
             return false;
         }
 
-        /*
-     * Once the requested cache level is already available, this
-     * is ordinary browsing rather than a recovery session.
-     */
+        // Once the requested cache level is already available, this
+        // is ordinary browsing rather than a recovery session.
         if (plan.kind === 'open') {
             openBeatport(
                 plan.release.releaseUrl
@@ -1849,19 +2101,68 @@
             String(plan.targetLevel)
         );
 
-        /*
-     * One helper tab owns the whole recovery attempt. If it finds
-     * Level 1 while Level 2 is wanted, that same tab will navigate
-     * itself to the exact release page.
-     */
+        const resultKey =
+              helperResultKey(
+                  id
+              );
+
+        await GM_deleteValue(
+            resultKey
+        );
+
+        setHbrFlowStatus(
+            'busy'
+        );
+
+        const helperTab =
+              openBeatport(
+                  target.toString()
+              );
+
+         // One helper tab owns the whole recovery attempt. If it finds
+         // Level 1 while Level 2 is wanted, that same tab will navigate
+         // itself to the exact release page.
         autoStartedFor =
             `${gtin}|${plan.targetLevel}`;
 
-        openBeatport(
-            target.toString()
-        );
+        if (
+            helperTab &&
+            typeof helperTab ===
+            'object'
+        ) {
+            helperTab.onclose =
+                async () => {
+                const result =
+                      await GM_getValue(
+                          resultKey,
+                          null
+                      );
 
-        return true;
+                // A successful helper writes its terminal state before
+                // closing itself. That close is normal and must not be
+                // interpreted as a user cancellation.
+                if (
+                    result?.requestId === id &&
+                    result?.state ===
+                    'success'
+                ) {
+                    await GM_deleteValue(
+                        resultKey
+                    );
+
+                    return;
+                }
+
+             // Explicit Cancel writes "skipped".
+             // No result at all means the user manually closed the
+             // Beatport helper tab, which is also a skip.
+                await finishSkippedBeatportLookup(
+                    id
+                );
+            };
+        }
+
+return true;
     }
 
     function recoveryButton({
@@ -1899,7 +2200,7 @@
             return false;
         }
 
-        const message = beatportMessage();
+        const message = ensureBeatportMessage();
 
         if (!message) {
             return false;
@@ -1921,6 +2222,12 @@
 
     async function maybeAutoLookup() {
         if (
+            suppressHbrLookupThisLoad
+        ) {
+            return;
+        }
+
+        if (
             !settings.auto ||
             !beatportEnabled() ||
             !beatportMessage()
@@ -1938,13 +2245,10 @@
             return;
         }
 
-        /*
-     * Deliberately ignore search/release stage here.
-     *
-     * One helper tab is responsible for the entire request. Once
-     * that helper discovers Level 1 it will navigate itself to the
-     * release page when Level 2 is required.
-     */
+         // Deliberately ignore search/release stage here.
+         // One helper tab is responsible for the entire request. Once
+         // that helper discovers Level 1 it will navigate itself to the
+         // release page when Level 2 is required.
         const key =
               `${barcode(harmonyBarcode())}|${plan.targetLevel}`;
 
@@ -1953,8 +2257,6 @@
         ) {
             return;
         }
-
-        autoStartedFor = key;
 
         const started =
               await startLookup(
@@ -1966,9 +2268,87 @@
         }
     }
 
+    function showBeatportSkippedStatus() {
+        const message =
+              ensureBeatportMessage();
+
+        if (!message) {
+            return;
+        }
+
+        const content =
+              messageContent(
+                  message
+              );
+
+        message.classList.remove(
+            'error'
+        );
+
+        message.style.borderColor =
+            '#999';
+
+        content.replaceChildren(
+            el(
+                'p',
+                {},
+                el(
+                    'strong',
+                    {
+                        text:
+                        'Beatport skipped'
+                    }
+                )
+            ),
+
+            el(
+                'p',
+                {
+                    text:
+                    'Beatport recovery was skipped for this lookup.'
+                }
+            )
+        );
+    }
+
+    async function finishSkippedBeatportLookup(requestId) {
+        await GM_deleteValue(
+            helperResultKey(
+                requestId
+            )
+        );
+
+        // Do not let Auto immediately launch another helper for
+        // this same page after the user deliberately skipped it.
+        suppressHbrLookupThisLoad =
+            true;
+
+        autoStartedFor =
+            null;
+
+        showBeatportSkippedStatus();
+
+        setHbrFlowStatus(
+            'finished'
+        );
+
+        console.info(
+            '[Harmony Beatport Recovery] Beatport skipped for this lookup.'
+        );
+    }
+
     // =========================================================================
     // Harmony release UI
     // =========================================================================
+
+    function suppressBeatportFailureMessage(message = beatportFailureMessage()) {
+        if (!message) {
+            return;
+        }
+
+        message.style.display =
+            'none';
+    }
 
     function ensureProvider(release) {
         const list = $('.provider-list');
@@ -2054,9 +2434,7 @@
                   el('td')
               );
 
-        /*
-     * Put the recovered label near the other release metadata.
-     */
+        // Put the recovered label near the other release metadata.
         tbody.appendChild(row);
 
         return $('td', row);
@@ -2144,7 +2522,7 @@
     }
 
     function ensureSuccessMessage(release) {
-        const message = beatportMessage();
+        const message = ensureBeatportMessage();
 
         if (!message) return;
 
@@ -2259,6 +2637,105 @@
         updateActionButton();
     }
 
+    function beatportMessage() {
+        return $(
+            `#${HBR_MESSAGE_ID}`
+        );
+    }
+
+    function ensureBeatportMessage() {
+        let message =
+            beatportMessage();
+
+        if (message) {
+            return message;
+        }
+
+        const host =
+              $('.release') ||
+              $('main');
+
+        if (!host) {
+            return null;
+        }
+
+        message =
+            el(
+            'div',
+            {
+                id:
+                HBR_MESSAGE_ID,
+
+                class:
+                'message info'
+            },
+
+            beatportIcon(
+                24,
+                2
+            ),
+
+            el(
+                'span',
+                {
+                    class:
+                    'provider',
+
+                    text:
+                    'Beatport Recovery:'
+                }
+            ),
+
+            el(
+                'div'
+            )
+        );
+
+        if (
+            isHarmonyReleaseActions()
+        ) {
+
+            //Release Actions placement
+            const actionsHeading =
+                  $$('h2', host)
+            .find(
+                heading =>
+                clean(
+                    heading.textContent
+                ) ===
+                'Release Actions'
+            );
+
+            if (actionsHeading) {
+                actionsHeading.after(
+                    message
+                );
+            } else {
+                host.append(
+                    message
+                );
+            }
+        } else {
+
+            // Release Lookup placement
+            const releaseTitle =
+                  $('.release-title', host);
+
+            if (releaseTitle) {
+                host.insertBefore(
+                    message,
+                    releaseTitle
+                );
+            } else {
+                host.append(
+                    message
+                );
+            }
+        }
+
+        return message;
+    }
+
     // =========================================================================
     // Harmony track comparison
     // =========================================================================
@@ -2305,10 +2782,8 @@
             icon.id = id;
         }
 
-        /*
-     * Harmony puts linked provider icons inside an entity-links
-     * group ahead of the displayed value.
-     */
+     // Harmony puts linked provider icons inside an entity-links
+     // group ahead of the displayed value.
         const entityLinks =
               $(':scope > .entity-links', cell) ||
               $('.entity-links', cell);
@@ -2363,10 +2838,9 @@
     }
 
     function harmonyTrackTitle(cell) {
-        /*
-     * Ignore Beatport alternatives that we may already have
-     * inserted into this cell.
-     */
+
+     // Ignore Beatport alternatives that we may already have
+     // inserted into this cell.
         const clone =
               cell.cloneNode(true);
 
@@ -2551,10 +3025,8 @@
                 const parent =
                       item.parentElement;
 
-                /*
-         * Remove the whitespace we inserted immediately before
-         * a matching provider icon.
-         */
+                // Remove the whitespace we inserted immediately before
+                // a matching provider icon.
                 if (
                     item.id.endsWith(
                         '-provider'
@@ -2970,9 +3442,7 @@
         const labels =
               seedLabels(form);
 
-        /*
-     * Best case: Harmony already seeded the same label.
-     */
+     // Best case: Harmony already seeded the same label.
         const exact =
               labels.find(
                   label =>
@@ -2988,12 +3458,9 @@
             return exact.index;
         }
 
-        /*
-     * Harmony omitted the Beatport label.
-     *
-     * Don't attach Beatport's catalog number to some unrelated
-     * label. Add Beatport as a new label entry instead.
-     */
+     // Harmony omitted the Beatport label:
+     // Don't attach Beatport's catalog number to some unrelated
+     // label. Add Beatport as a new label entry instead.
         const index =
               labels.length
         ? Math.max(
@@ -3034,10 +3501,8 @@
             return;
         }
 
-        /*
-     * The label itself is worth seeding even when Beatport has no
-     * catalog number.
-     */
+     // The label itself is worth seeding even when Beatport has no
+     // catalog number.
         if (!release.catalogNumber) {
             return;
         }
@@ -3152,7 +3617,7 @@
         if (!field) return;
 
         const line =
-              `* Beatport: ${release.releaseUrl}`;
+              `* Beatport: ${release.releaseUrl} ${HBR_EDIT_NOTE_SUFFIX}`;
 
         if (
             !field.value.includes(line)
@@ -3169,7 +3634,8 @@
 
     function ensureBeatportRedirectState(form, release) {
         if (
-            !release?.releaseId
+            !release?.releaseId ||
+            !release.releaseUrl
         ) {
             return;
         }
@@ -3196,13 +3662,6 @@
             return;
         }
 
-        /*
-     * Only touch Harmony's Release Actions redirect.
-     *
-     * This preserves every parameter Harmony already encoded
-     * while explicitly carrying the failed Beatport provider
-     * forward by release ID.
-     */
         if (
             redirect.pathname !==
             '/release/actions'
@@ -3210,24 +3669,34 @@
             return;
         }
 
+        // Never use Beatport as a native provider parameter.
+        redirect.searchParams.delete(
+            'beatport'
+        );
+
         const releaseId =
               String(
                   release.releaseId
               );
 
-        if (
-            redirect.searchParams.get(
-                'beatport'
-            ) ===
-            releaseId
-        ) {
-            return;
-        }
-
-        redirect.searchParams.set(
-            'beatport',
-            releaseId
+        const alreadyPresent =
+              redirect.searchParams
+        .getAll(
+            'url'
+        )
+        .some(
+            value =>
+            beatportReleaseIdFromUrl(
+                value
+            ) === releaseId
         );
+
+        if (!alreadyPresent) {
+            redirect.searchParams.append(
+                'url',
+                release.releaseUrl
+            );
+        }
 
         field.value =
             redirect.toString();
@@ -3236,9 +3705,12 @@
             '1';
 
         debugReleaseActions(
-            'Added Beatport release ID to Harmony redirect state.',
+            'Added Beatport release URL to Harmony redirect state.',
             {
                 releaseId,
+                releaseUrl:
+                release.releaseUrl,
+
                 redirect:
                 field.value
             }
@@ -3280,24 +3752,7 @@
         );
 
         ensureEditNote(
-            form,
-            release
-        );
-
-        /*
-     * Harmony normally only carries successful providers into
-     * the post-MusicBrainz Release Actions redirect.
-     *
-     * Beatport failed, so explicitly preserve its known release ID:
-     *
-     *     beatport=<release ID>
-     *
-     * Release Actions will then retry Beatport itself and render
-     * its normal Beatport failure message, which HBR can use as
-     * both activation signal and release identity.
-     */
-        ensureBeatportRedirectState(
-            form,
+    form,
             release
         );
 
@@ -3305,6 +3760,19 @@
             name ===
             'release-seeder'
         ) {
+
+            // New release imports need to carry Beatport forward into
+            // Release Actions because Harmony cannot preserve a failed
+            // provider itself.
+            // Update seeds are intentionally different: Harmony leaves
+            // their Release Actions redirect MBID-only so it can rebuild
+            // the complete provider set from the existing MusicBrainz
+            // release. Do not alter that redirect.
+            ensureBeatportRedirectState(
+                form,
+                release
+            );
+
             ensureCatalogNumber(
                 form,
                 release
@@ -3580,7 +4048,7 @@
             setupBeatportCheckbox();
 
             console.debug(
-                `[Harmony Beatport Recovery] Activated after native Beatport failure for UPC ${upc}.`
+                `[Harmony Beatport Recovery] Activated for requested Beatport lookup UPC ${upc}.`
             );
         })();
 
@@ -3625,7 +4093,7 @@
 
     function harmonyUiReady(record) {
         if (
-            !beatportMessage() ||
+            !$('.release') ||
             !$('.provider-list')
         ) {
             return false;
@@ -3654,72 +4122,56 @@
     }
 
     async function checkHarmonyState() {
+
+        if (
+            !ensureBeatportSelectionSnapshot()
+        ) {
+            return;
+        }
+            suppressBeatportFailureMessage();
+
         const upc =
               barcode(
                   harmonyBarcode()
               );
 
-        /*
-     * Harmony has completely failed to construct a release.
-     *
-     * If this was a Beatport URL lookup, the URL already gives us
-     * the exact Beatport release ID. Use that as the authoritative
-     * pointer into HBR's cache instead of looking back at Harmony's
-     * temporary GTIN search field.
-     */
-        if (
-            beatportFailureMessage() &&
-            noProviderReturnedRelease() &&
-            !upc
-        ) {
-            const releaseId =
-                  beatportReleaseIdFromUrl(
-                      $('#url-input')?.value
-                  );
-
-            if (releaseId) {
-                const handled =
-                      await showNoHarmonyReleaseMessage(
-                          releaseId
-                      );
-
-                if (handled) {
-                    return;
-                }
-            }
-        }
-        /*
-     * A failed Beatport URL-only lookup has no rendered Harmony UPC yet.
-     *
-     * Only after Harmony itself has:
-     *
-     *   - failed Beatport with "Failed to extract embedded JSON"
-     *   - returned no release
-     *   - preserved a Beatport release URL
-     *   - left GTIN empty
-     *
-     * do we attempt URL -> UPC recovery.
-     */
-        if (!upc) {
-            await resolveFailedBeatportUrlLookup();
+     // HBR does not make any provider-recovery decision until
+     // MPL has either finished or is not participating.
+        if (!mplAllowsHbr()) {
+            scheduleMplBeatportRecheck();
 
             return;
         }
 
-        /*
-     * Preserve the strict activation rule:
-     *
-     * - Harmony must have rendered a UPC
-     * - its native Beatport provider must have failed with the
-     *   expected "Failed to extract embedded JSON" error
-     */
-        if (
-            activatedUPC !== upc
-        ) {
-            if (!beatportFailureMessage()) {
+        // URL -> UPC recovery.
+        // Once MPL has released HBR, URL-only Beatport failures may
+        // bootstrap themselves through:
+        // release URL -> release ID -> cache -> UPC -> Harmony retry.
+        if (!upc) {
+            const handled =
+                  await resolveFailedBeatportUrlLookup();
+
+            if (handled) {
                 return;
             }
 
+            // Harmony has reached a terminal state in which HBR has
+            // no usable UPC and URL recovery does not apply.
+            if (
+                $('.provider-list') ||
+                noProviderReturnedRelease()
+            ) {
+                setHbrFlowStatus(
+                    'finished'
+                );
+            }
+
+            return;
+        }
+
+        if (
+            activatedUPC !== upc
+        ) {
             await activateHarmony(
                 upc
             );
@@ -3735,14 +4187,16 @@
         setupBeatportCheckbox();
 
         if (!beatportEnabled()) {
+            setHbrFlowStatus(
+                'finished'
+            );
+
             return;
         }
 
-        /*
-     * From this point onward Harmony never performs another
-     * Beatport lookup. It simply watches the UPC pointer and,
-     * once known, that release's cache record.
-     */
+     // From this point onward Harmony never performs another
+     // Beatport lookup. It simply watches the UPC pointer and,
+     // once known, that release's cache record.
         await ensureHarmonyCacheWatch(
             upc
         );
@@ -3755,7 +4209,9 @@
 
             if (
                 uiAppliedRecordStamp !== stamp &&
-                harmonyUiReady(activeRecord)
+                harmonyUiReady(
+                    activeRecord
+                )
             ) {
                 syncRecoveredUi(
                     activeRecord.release
@@ -3769,122 +4225,62 @@
                 await maybeAutoLookup();
             }
 
+            const have =
+                  recordLevel(
+                      activeRecord
+                  );
+
+            const want =
+                  desiredLevel();
+
+         // The requested Beatport data is now present on this same
+         // Harmony page. Any HBR helper that produced it has finished,
+         // so release the next provider in the chain.
+            if (
+                have >= want
+            ) {
+                setHbrFlowStatus(
+                    'finished'
+                );
+            } else if (
+                getHbrFlowStatus() !==
+                'busy'
+            ) {
+
+             // Missing data remains, but HBR is not automatically
+             // retrieving it. For example Auto may be disabled and
+             // the user has only been offered a manual button.
+                setHbrFlowStatus(
+                    'finished'
+                );
+            }
+
             return;
         }
 
-        if (beatportMessage()) {
+        if (ensureBeatportMessage()) {
             if (
                 controlsReadyUPC !== upc &&
                 ensureRecoveryControls()
             ) {
-                controlsReadyUPC = upc;
+                controlsReadyUPC =
+                    upc;
             }
 
             await maybeAutoLookup();
-        }
-    }
 
-    async function showNoHarmonyReleaseMessage(releaseId) {
-        if (!releaseId) {
-            return false;
         }
 
-        /*
-     * The Beatport URL gives us the exact release identity.
-     * Read that canonical cache record directly.
-     */
-        const record =
-              await getCachedRelease(
-                  releaseId
-              );
-
-        if (!record?.release) {
-            return false;
-        }
-
-        const release =
-              record.release;
-
-        const message =
-              beatportFailureMessage();
-
-        if (!message) {
-            return false;
-        }
-
+        // If no helper was launched, HBR has finished its automatic
+        // work even though a manual recovery option may remain.
         if (
-            message.dataset
-            .hbrNoHarmonyRelease ===
-            String(
-                release.releaseId
-            )
+            getHbrFlowStatus() !==
+            'busy'
         ) {
-            return true;
+            setHbrFlowStatus(
+                'finished'
+            );
         }
-
-        message.dataset
-            .hbrNoHarmonyRelease =
-            String(
-            release.releaseId
-        );
-
-        const content =
-              messageContent(
-                  message
-              );
-
-        content.replaceChildren(
-            el(
-                'p',
-                {},
-                el(
-                    'strong',
-                    {
-                        text:
-                        'Beatport provider offline'
-                    }
-                )
-            ),
-
-            el(
-                'p',
-                {
-                    text:
-                    'No other Harmony provider returned a release, so Beatport Recovery has no Harmony release to enrich.'
-                }
-            ),
-
-            el(
-                'p',
-                {
-                    text:
-                    'The exact Beatport release is already in the Beatport Recovery cache. Seed the release directly using a Beatport MusicBrainz importer instead.'
-                }
-            ),
-
-            el(
-                'p',
-                {},
-                el(
-                    'a',
-                    {
-                        href:
-                        release.releaseUrl,
-
-                        target:
-                        '_blank',
-
-                        rel:
-                        'noopener noreferrer',
-
-                        text:
-                        'Open release on Beatport'
-                    }
-                )
-            )
-        );
-
-        return true;
     }
 
     // =========================================================================
@@ -4384,20 +4780,13 @@
         );
     }
 
-    /*
-     * Reduce a Beatport entity URL to its stable identity.
-     *
-     * The slug is cosmetic. If MusicBrainz contains:
-     *
-     *   /artist/old-slug/123
-     *
-     * and Beatport now gives:
-     *
-     *   /artist/new-slug/123
-     *
-     * those are still the same external entity and should not be
-     * suggested twice.
-     */
+    // Reduce a Beatport entity URL to its stable identity.
+    // The slug is cosmetic. If MusicBrainz contains:
+    //   /artist/old-slug/123
+    // and Beatport now gives:
+    //   /artist/new-slug/123
+    // those are still the same external entity and should not be
+    // suggested twice.
     function beatportEntityIdentity(url) {
         try {
             const parsed =
@@ -4731,12 +5120,9 @@
                               )
                           );
 
-                    /*
-                     * Position establishes correspondence, matching
-                     * Harmony's own merge model.
-                     *
-                     * Title or ISRC confirms that position is sane.
-                     */
+                    // Position establishes correspondence, matching
+                    // Harmony's own merge model.
+                    // Title or ISRC confirms that position is sane.
                     if (
                         !titleMatches &&
                         !isrcMatches
@@ -4833,7 +5219,8 @@
         url.searchParams.set(
             `${prefix}.edit_note`,
             `Matched ${candidate.entityType} while importing ` +
-            `https://musicbrainz.org/release/${releaseMbid} with Harmony`
+            `https://musicbrainz.org/release/${releaseMbid} with Harmony ` +
+            HBR_EDIT_NOTE_SUFFIX
         );
 
         return url;
@@ -4868,13 +5255,7 @@
         let button =
             $('button.open-all-links');
 
-        /*
-     * Harmony did not create an Open All button because it had
-     * no recording-link actions of its own.
-     *
-     * Find the recording actions HBR/Harmony now has and create
-     * the same basic action-group control ahead of them.
-     */
+        // Create an "open all links" button if Harmony didn't
         if (!button) {
             const firstRecordingAction =
                   links[0]
@@ -4891,11 +5272,7 @@
                     '.action-group'
                 );
 
-            /*
-         * HBR-created recording actions may not already live in
-         * an action-group, so create one and move the contiguous
-         * recording actions into it.
-         */
+         // put HBR recording actions into action group for the click-all button
             if (!group) {
                 group =
                     el(
@@ -4981,10 +5358,8 @@
             );
         }
 
-        /*
-     * Clone Harmony's button if necessary to remove its hydrated
-     * Fresh listener, which contains the original unpatched URLs.
-     */
+        // Clone Harmony's button if necessary to remove its hydrated
+        // Fresh listener, which contains the original unpatched URLs.
         if (
             button.dataset.hbrPatched !==
             '1'
@@ -5481,12 +5856,10 @@
                 missingCount++;
             }
 
-            /*
-         * Keep every track position.
-         *
-         * MagicISRC is positional. Blank tracks must remain
-         * blank rather than shifting later ISRCs forward.
-         */
+            // Keep every track position.
+            //
+            // MagicISRC is positional. Blank tracks must remain
+            // blank rather than shifting later ISRCs forward.
             tracks.push({
                 position:
                 index + 1,
@@ -5508,10 +5881,8 @@
 
                 missing,
 
-                /*
-             * Only missing ISRCs are actually submitted.
-             * Existing ones become blank parameters.
-             */
+                // Only missing ISRCs are actually submitted.
+                // Existing ones become blank parameters.
                 submissionIsrc:
                 missing
                 ? beatportIsrc
@@ -5643,12 +6014,10 @@
             return false;
         }
 
-        /*
-     * Defensive check.
-     *
-     * The builder already skips if Harmony supplied an ISRC
-     * action, but never create a second MagicISRC action.
-     */
+        // Defensive check.
+        //
+        // The builder already skips if Harmony supplied an ISRC
+        // action, but never create a second MagicISRC action.
         if (
             $('.magic-isrc')
         ) {
@@ -5755,46 +6124,55 @@
         return true;
     }
 
-    function releaseActionsBeatportId(message) {
-        if (!message) {
+    function beatportFailureMessage() {
+        return $$('.message.error')
+            .find(
+            message => {
+                const provider =
+                      clean(
+                          $('.provider', message)
+                          ?.textContent
+                      )
+                .replace(
+                    /:$/,
+                    ''
+                )
+                .trim();
+
+                return (
+                    provider.toLowerCase() ===
+                    'beatport'
+                );
+            }
+        ) || null;
+    }
+
+    function releaseActionsBeatportId(beatportMessage) {
+        if (!beatportMessage) {
             return '';
         }
 
+        // Release Actions only belongs to HBR when Harmony itself
+        // attempted an exact Beatport release lookup and failed.
+        //
+        // The native failure message contains the exact Beatport
+        // release URL, which supplies the canonical release ID.
+
+        // kellnerd pls dont break
         for (
             const link
             of $$(
                 'a[href]',
-                message
+                beatportMessage
             )
         ) {
-            try {
-                const url =
-                      new URL(
-                          link.href,
-                          location.href
-                      );
+            const releaseId =
+                  beatportReleaseIdFromUrl(
+                      link.href
+                  );
 
-                if (
-                    ![
-                        'beatport.com',
-                        'www.beatport.com'
-                    ].includes(
-                        url.hostname
-                    )
-                ) {
-                    continue;
-                }
-
-                const match =
-                      url.pathname.match(
-                          /^\/release\/[^/]+\/(\d+)\/?$/
-                      );
-
-                if (match) {
-                    return match[1];
-                }
-            } catch {
-                // Ignore malformed links.
+            if (releaseId) {
+                return releaseId;
             }
         }
 
@@ -5824,7 +6202,9 @@
 
         url.searchParams.set(
             'edit-note',
-            `Import ISRCs from ${action.sourceUrl} to https://musicbrainz.org/release/${action.releaseMbid}`
+            `Import ISRCs from ${action.sourceUrl} to ` +
+            `https://musicbrainz.org/release/${action.releaseMbid} ` +
+            HBR_EDIT_NOTE_SUFFIX
         );
 
         return url;
@@ -6105,11 +6485,9 @@
         const results =
               {};
 
-        /*
-     * Keep these sequential so we continue respecting the
-     * MusicBrainz request spacing already enforced by
-     * musicBrainzJson().
-     */
+     // Keep these sequential so we continue respecting the
+     // MusicBrainz request spacing already enforced by
+     // musicBrainzJson().
         for (
             const type
             of types
@@ -6487,10 +6865,8 @@
             return;
         }
 
-        /*
-     * Beatport identity comes directly from Harmony's
-     * native Beatport failure message.
-     */
+        // Beatport identity comes from the exact Beatport release URL
+        // carried through Harmony's url= state.
         const cachedRecord =
               await getCachedRelease(
                   beatportReleaseId
@@ -6839,11 +7215,9 @@
                 candidate.entityType
             ];
 
-            /*
-         * If the browse request for this entity type failed,
-         * we cannot safely know whether its Beatport link
-         * already exists.
-         */
+            // If the browse request for this entity type failed,
+            // we cannot safely know whether its Beatport link
+            // already exists.
             if (
                 !result.ok
             ) {
@@ -6936,10 +7310,8 @@
 
         ensureOpenAllRecordingLinksButton();
 
-        /*
-     * Reuse Harmony's native Beatport error box as the
-     * permanent HBR status display.
-     */
+        // Use HBR's Beatport message as the permanent
+        // Release Actions status display.
         if (
             failedLookups.length
         ) {
@@ -7090,10 +7462,12 @@
             return;
         }
 
-        const beatportMessage =
+        // Harmony's native Beatport failure is the trigger and
+        // authoritative source of the exact Beatport release ID.
+        const nativeBeatportFailure =
               beatportFailureMessage();
 
-        if (!beatportMessage) {
+        if (!nativeBeatportFailure) {
             debugReleaseActions(
                 'Release Actions inactive: no native Beatport failure message.'
             );
@@ -7103,7 +7477,7 @@
 
         const beatportReleaseId =
               releaseActionsBeatportId(
-                  beatportMessage
+                  nativeBeatportFailure
               );
 
         if (!beatportReleaseId) {
@@ -7111,6 +7485,19 @@
                 'Release Actions inactive: Beatport failure did not expose a release ID.'
             );
 
+            return;
+        }
+
+        // We have consumed everything HBR needs from Harmony's
+        // failure. Hide it and use HBR's own message from here on.
+        suppressBeatportFailureMessage(
+            nativeBeatportFailure
+        );
+
+        const beatportMessage =
+              ensureBeatportMessage();
+
+        if (!beatportMessage) {
             return;
         }
 
@@ -7126,13 +7513,6 @@
             }
         );
 
-        /*
-     * Release Actions knows the exact Beatport release ID.
-     *
-     * Watch that record directly. When Beatport upgrades the
-     * cache from Level 1 to Level 2, run the same idempotent
-     * processing pipeline again.
-     */
         releaseActionsReleaseListener =
             GM_addValueChangeListener(
             cacheKey(
@@ -7181,16 +7561,30 @@
     function initHarmony() {
         clearResolvedUrlUpcField();
 
-        /*
-     * Release Actions is a separate Harmony workflow.
-     * It does not use the normal failed-provider activation gate.
-     */
+        // Release Actions is a separate downstream workflow and is
+        // not part of the provider lookup handshake.
         if (
             isHarmonyReleaseActions()
         ) {
             initReleaseActions();
 
             return;
+        }
+
+         // If HBR itself caused the previous automatic Harmony
+         // navigation/reload, consume that busy state now.
+         //
+         // This releases the next provider in the chain while also
+         // suppressing another automatic HBR lookup on this load.
+        suppressHbrLookupThisLoad =
+            consumeHbrReturnLoad();
+
+        if (
+            !suppressHbrLookupThisLoad
+        ) {
+            setHbrFlowStatus(
+                'waiting'
+            );
         }
 
         new MutationObserver(
@@ -7408,11 +7802,9 @@
                 name: artist.name ?? null
             })),
 
-            /*
-         * Only full/rich v4 release objects normally contain this.
-         * Keep Beatport's raw order here. It is reversed later when
-         * assembling Level 2.
-         */
+            // Only full/rich v4 release objects normally contain this.
+            // Keep Beatport's raw order here. It is reversed later when
+            // assembling Level 2.
             ...(trackUrls.length
                 ? { trackUrls }
                 : {}),
@@ -7565,10 +7957,8 @@
                   LEVEL.RELEASE
               );
 
-        /*
-     * Never let a sparse release observation erase a richer
-     * full-release track URL list.
-     */
+        // Never let a sparse release observation erase a richer
+        // full-release track URL list.
         if (
             (existing.trackUrls?.length || 0) >
             (incoming.trackUrls?.length || 0)
@@ -7765,9 +8155,7 @@
                     return;
                 }
 
-                /*
-             * Existing Level-1 release recognition.
-             */
+             // Existing Level-1 release recognition.
                 const release =
                       normalizeBeatportRelease(
                           value
@@ -7779,9 +8167,7 @@
                     );
                 }
 
-                /*
-             * Embedded rich track query recognition.
-             */
+             // Embedded rich track query recognition.
                 const tracklist =
                       beatportTracklistQuery(
                           value
@@ -7795,10 +8181,8 @@
             }
         );
 
-        /*
-     * Network responses from /catalog/tracks do not contain the
-     * React Query wrapper, so recognize those using their URL.
-     */
+        // Network responses from /catalog/tracks do not contain the
+        // React Query wrapper, so recognize those using their URL.
         rememberTracklist(
             beatportTracklistResponse(
                 payload,
@@ -7891,10 +8275,8 @@
                 return null;
             }
 
-            /*
-         * Rich tracks may arrive over more than one paginated
-         * response, so only reject if we have too few.
-         */
+         // Rich tracks may arrive over more than one paginated
+         // response, so only reject if we have too few.
             if (
                 richTracks.length <
                 expectedCount
@@ -7947,11 +8329,9 @@
             const url =
                   orderedUrls[index];
 
-            /*
-         * Exact URL matching is Harmony's original strategy.
-         * ID matching is a harmless fallback in case Beatport
-         * changes API hostnames while keeping the same track IDs.
-         */
+         // Exact URL matching is Harmony's original strategy.
+         // ID matching is a harmless fallback in case Beatport
+         // changes API hostnames while keeping the same track IDs.
             const orderedId =
                   beatportTrackIdFromUrl(
                       url
@@ -8008,14 +8388,12 @@
             return null;
         }
 
-        /*
-     * The persistent cache is authoritative.
-     *
-     * If this release is already Level 2, there is nothing
-     * for the assembler to rebuild. Any Level-1 metadata
-     * observed immediately beforehand has already been merged
-     * into that Level-2 cache record by cacheReleaseBatch().
-     */
+     // The persistent cache is authoritative.
+     //
+     // If this release is already Level 2, there is nothing
+     // for the assembler to rebuild. Any Level-1 metadata
+     // observed immediately beforehand has already been merged
+     // into that Level-2 cache record by cacheReleaseBatch().
         const cached =
               await getCachedRelease(
                   releaseId
@@ -8029,21 +8407,17 @@
             assembly.level2Complete =
                 true;
 
-            /*
-         * Keep the in-memory assembly synchronized with the
-         * canonical cached release in case anything else in
-         * this page session refers to it.
-         */
+         // Keep the in-memory assembly synchronized with the
+         // canonical cached release in case anything else in
+         // this page session refers to it.
             assembly.release =
                 cached.release;
 
             return cached;
         }
 
-        /*
-     * If the track query arrived before the release object,
-     * a cached Level-1 record can supply the release half.
-     */
+     // If the track query arrived before the release object,
+     // a cached Level-1 record can supply the release half.
         if (
             !assembly.release &&
             cached?.release
@@ -8084,10 +8458,9 @@
     }
 
     async function ingestBeatportDataNow(data, sourceUrl = '', source = 'network') {
-        /*
-     * A single payload can contain the same release more than once.
-     * Deduplicate/merge it before touching storage.
-     */
+
+        // A single payload can contain the same release more than once.
+        // Deduplicate/merge it before touching storage.
         const releases =
               new Map();
 
@@ -8150,9 +8523,7 @@
         const touchedReleaseIds =
               new Set();
 
-        /*
-     * First feed all discovered pieces into the in-memory assembler.
-     */
+        // First feed all discovered pieces into the in-memory assembler.
         for (
             const release
             of releases.values()
@@ -8213,10 +8584,8 @@
             );
         }
 
-        /*
-     * Every recognized release still enters the normal Level-1
-     * cache exactly as before.
-     */
+     // Every recognized release still enters the normal Level-1
+     // cache exactly as before.
         if (releases.size) {
             await cacheReleaseBatch(
                 [...releases.values()],
@@ -8224,10 +8593,8 @@
             );
         }
 
-        /*
-     * Any touched release may now have both halves required
-     * for Level 2.
-     */
+     // Any touched release may now have both halves required
+     // for Level 2.
         for (
             const releaseId
             of touchedReleaseIds
@@ -8631,9 +8998,7 @@
                 );
             }
         } catch {
-            /*
-         * Cosmetic only.
-         */
+            // Cosmetic only.
         }
     }
 
@@ -8696,9 +9061,7 @@
             return session;
         }
 
-        /*
-     * Preserve the resolver across a Beatport same-tab reload.
-     */
+        // Preserve the resolver across a Beatport same-tab reload.
         try {
             const stored =
                   JSON.parse(
@@ -8732,9 +9095,7 @@
                 };
             }
         } catch {
-            /*
-         * Ignore invalid session data.
-         */
+            // Ignore invalid session data.
         }
 
         return null;
@@ -8807,10 +9168,8 @@
             return false;
         }
 
-        /*
-     * The universal Beatport scraper owns this record.
-     * This helper only watches it.
-     */
+     // The universal Beatport scraper owns this record.
+     // This helper only watches it.
         const record =
               await getCachedRelease(
                   session.releaseId
@@ -8823,15 +9182,15 @@
             return false;
         }
 
-        /*
-     * RELEASE ACTIONS MODE
-     *
-     * The exact release is already known. Wait until the universal
-     * scraper upgrades it to Level 2.
-     *
-     * Harmony Release Actions independently watches this exact
-     * cache key, so no response event is necessary.
-     */
+        //
+        // RELEASE ACTIONS MODE
+        //
+        // The exact release is already known. Wait until the universal
+        // scraper upgrades it to Level 2.
+        //
+        // Harmony Release Actions independently watches this exact
+        // cache key, so no response event is necessary.
+        //
         if (
             session.mode ===
             'tracks'
@@ -8861,12 +9220,9 @@
 
             return true;
         }
-
-        /*
-     * URL -> UPC MODE
-     *
-     * Existing behavior.
-     */
+        //
+        // URL -> UPC MODE
+        //
         if (
             !clean(
                 record
@@ -8928,11 +9284,9 @@
             urlResolverSession
         );
 
-        /*
-     * The embedded scraper may already have populated the record
-     * before this listener is installed, so we both listen AND
-     * perform an immediate read below.
-     */
+        // The embedded scraper may already have populated the record
+        // before this listener is installed, so we both listen AND
+        // perform an immediate read below.
         urlResolverReleaseListener =
             GM_addValueChangeListener(
             cacheKey(
@@ -9040,11 +9394,9 @@
                   )
               );
 
-        /*
-     * The first Harmony-created URL seeds a session local to this
-     * Beatport tab. sessionStorage then follows the user through
-     * subsequent Beatport navigation even though ?hbr disappears.
-     */
+        // The first Harmony-created URL seeds a session local to this
+        // Beatport tab. sessionStorage then follows the user through
+        // subsequent Beatport navigation even though ?hbr disappears.
         if (
             requestIdFromUrl &&
             upcFromUrl &&
@@ -9070,11 +9422,9 @@
                 JSON.stringify(session)
             );
 
-            /*
-         * The query parameters are only bootstrap information.
-         * Removing them means manual browsing produces ordinary
-         * Beatport URLs while the helper survives in sessionStorage.
-         */
+            // The query parameters are only bootstrap information.
+            // Removing them means manual browsing produces ordinary
+            // Beatport URLs while the helper survives in sessionStorage.
             stripHelperUrlParams();
 
             return session;
@@ -9239,11 +9589,38 @@
 
         cancel.addEventListener(
             'click',
-            () => {
+            async () => {
+                const session =
+                      helperSession;
+
+                if (!session) {
+                    window.close();
+                    return;
+                }
+
+                // Tell the Harmony tab that this is an intentional skip
+                // before closing the helper.
+                await GM_setValue(
+                    helperResultKey(
+                        session.requestId
+                    ),
+                    {
+                        requestId:
+                        session.requestId,
+
+                        state:
+                        'skipped',
+
+                        timestamp:
+                        Date.now()
+                    }
+                );
+
                 stopBeatportHelperWatch();
                 clearBeatportHelperSession();
                 stripHelperUrlParams();
-                panel.remove();
+
+                window.close();
             }
         );
 
@@ -9252,23 +9629,39 @@
         document.body.append(panel);
     }
 
-    function finishBeatportHelper(session, record) {
+    async function finishBeatportHelper(session,record) {
+        // Mark this as a successful script-driven close before closing.
+        // The Harmony-side tab onclose handler uses this to distinguish
+        // success from a manual close.
+        await GM_setValue(
+            helperResultKey(
+                session.requestId
+            ),
+            {
+                requestId:
+                session.requestId,
+
+                state:
+                'success',
+
+                releaseId:
+                String(
+                    record.release.releaseId
+                ),
+
+                level:
+                recordLevel(
+                    record
+                ),
+
+                timestamp:
+                Date.now()
+            }
+        );
+
         stopBeatportHelperWatch();
         clearBeatportHelperSession();
         stripHelperUrlParams();
-
-        /*
-     * Normally GM_openInTab-created tabs can close themselves.
-     * If the browser refuses, the completion notice remains visible.
-     */
-        helperPanel(
-            session,
-            `Recovered Beatport ${
-            recordLevel(record) >= LEVEL.TRACKS
-            ? 'release and track'
-            : 'release'
-            } data. This tab can be closed.`
-        );
 
         window.close();
     }
@@ -9313,9 +9706,7 @@
                   session.upc
               );
 
-        /*
-     * The helper may have been cancelled while awaiting storage.
-     */
+        // The helper may have been cancelled while awaiting storage.
         if (
             helperSession !== session
         ) {
@@ -9336,13 +9727,9 @@
             return;
         }
 
-        /*
-     * This is no longer an error or timeout.
-     *
-     * The user can search, open an artist/label page, change the
-     * search terms, etc. The universal Beatport scraper keeps doing
-     * its normal work and this listener waits for the UPC pointer.
-     */
+        // The user can search, open an artist/label page, change the
+        // search terms, etc. The universal Beatport scraper keeps doing
+        // its normal work and this listener waits for the UPC pointer.
         if (!state.releaseId) {
             clearBeatportHelperReleaseWatch();
 
@@ -9381,15 +9768,13 @@
             return;
         }
 
-        /*
-     * Desired cache level reached. There is no event back to Harmony:
-     * Harmony is independently watching this same cache record.
-     */
+        // Desired cache level reached. There is no event back to Harmony:
+        // Harmony is independently watching this same cache record.
         if (
             recordLevel(record) >=
             session.targetLevel
         ) {
-            finishBeatportHelper(
+            await finishBeatportHelper(
                 session,
                 record
             );
@@ -9397,11 +9782,9 @@
             return;
         }
 
-        /*
-     * Level 1 identifies the exact Beatport release. If Level 2 was
-     * requested, navigate to it. The universal scraper—not this
-     * helper—will ingest the full release/track JSON and upgrade it.
-     */
+        // Level 1 identifies the exact Beatport release. If Level 2 was
+        // requested, navigate to it. The universal scraper—not this
+        // helper—will ingest the full release/track JSON and upgrade it.
         if (
             session.targetLevel >= LEVEL.TRACKS
         ) {
@@ -9471,11 +9854,9 @@
             )
         );
 
-        /*
-     * Do an initial read as well as listening for future changes.
-     * This handles a UPC that the universal scraper cached before
-     * the helper listener finished initializing.
-     */
+     // Do an initial read as well as listening for future changes.
+     // This handles a UPC that the universal scraper cached before
+     // the helper listener finished initializing.
         await refreshBeatportHelper();
     }
 
@@ -9501,7 +9882,9 @@
     }
 
     function init() {
-        if (isHarmony()) {
+        if (isHarmonySettings()) {
+            initHarmonySettings();
+        } else if (isHarmony()) {
             initHarmony();
         } else if (isBeatport()) {
             processBeatport();
