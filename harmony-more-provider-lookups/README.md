@@ -35,17 +35,6 @@ Run these in the browser's developer console on a page where MPL is active. Comm
 
 Deleted releases can be cached again through subsequent observations. Listing numbers are local to the most recent listing/search, not permanent IDs.
 
-Advanced commands change the current Harmony release:
-
-```javascript
-await MPL.resolveAndInject({
-    provider: "soundcloud",
-    target: {title: "Whiskers EP", artists: ["Flintwick"], trackCount: 5}
-});
-```
-
-This runs the normal resolver, including any required user selection, then injects a found release. `await MPL.injectRelease(response)` injects an already constructed MPL release response; it expects MPL's internal response format, not raw provider JSON.
-
 Provider IDs: `bandcamp`, `soundcloud`, `traxsource`, `ytmusic`, `sevendigital`.
 
 ## Information for cooperating userscripts
