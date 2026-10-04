@@ -1,4 +1,4 @@
-# musicbrainz-userscripts
+# MusicBrainz Userscripts
 A collection of userscripts for improving and extending MusicBrainz.
 
 Note: All scripts written with the use of LLM ai
@@ -15,7 +15,7 @@ Improves the display of DJ-mix relationships on release pages.
 - Preserves gaps in track numbering
 - Removes disambiguation clutter
 
-### Harmony: Beatport Recovery
+### Harmony: Beatport Recovery (HBR)
 
 Restores Beatport functionality to Harmony.  
 [Install](harmony-beatport-recovery/harmony-beatport-recovery.user.js)
@@ -27,6 +27,18 @@ Restores Beatport functionality to Harmony.
 - Passively scrapes Beatport during general browsing. Harmony lookup checks local cache first before running a search to cut down on page loads.
 - Cache size is configurable but default is between 1500-2000 releases. should be at most a couple MB disk-space wise
 - use the console commands HBR.cacheStats() and HBR.listCache() to check on current cache size and contents
+
+### Harmony: More Provider Lookups (MPL)
+
+Adds additional providers to Harmony using a similar method to the Beatport script above.  
+[Install](harmony-more-provider-lookups/harmony-more-provider-lookups.user.js)
+
+- Background lookup or manual lookup
+- Auto-resolution on definitive matches, otherwise offering user review before UI injection
+- Works on lookup page and release actions
+- Passive observation scraping and caching during manual browsing of provider sites
+- Currently supports **Bandcamp, SoundCloud, Traxsource, YouTube Music and 7digital**.
+- More to come when I have time.
 
 ### MusicBrainz: Bulk Copy-Paste Work Codes V2
 Original script by ROpdebee  
